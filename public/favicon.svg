@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="clipoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#7C3AED" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#7C3AED" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <!-- Rounded background -->
+  <rect width="512" height="512" rx="128" fill="url(#clipoGrad)" filter="url(#shadow)"/>
+  <!-- Bold C letterform -->
+  <path d="M340 168 C310 138 268 122 222 130 C160 142 116 196 116 262 C116 328 162 382 228 392 C274 400 316 384 344 354"
+        fill="none"
+        stroke="#FFFFFF"
+        stroke-width="56"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        opacity="1"/>
+</svg>

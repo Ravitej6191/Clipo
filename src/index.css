@@ -1,0 +1,117 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    min-height: 100%;
+    background-color: #FAF9F5;
+    color: #111827;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  *:focus-visible {
+    outline: 2px solid #111827;
+    outline-offset: 2px;
+    outline-opacity: 0.25;
+  }
+
+  html { scroll-behavior: smooth; }
+}
+
+/* ─── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #E5E7EB; border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: #D1D5DB; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* ─── Rich text content (contenteditable body) ───────────────────────────── */
+.clipo-richtext { outline: none; -webkit-user-modify: read-write; }
+.clipo-richtext b,
+.clipo-richtext strong { font-weight: 700; }
+.clipo-richtext i,
+.clipo-richtext em { font-style: italic; }
+.clipo-richtext u { text-decoration: underline; }
+.clipo-richtext s,
+.clipo-richtext strike { text-decoration: line-through; }
+.clipo-richtext h1 { font-size: 1.375rem; font-weight: 800; line-height: 1.25; margin: 12px 0 4px; }
+.clipo-richtext h2 { font-size: 1.125rem; font-weight: 700; line-height: 1.3;  margin: 10px 0 3px; }
+.clipo-richtext h3 { font-size: 1rem;     font-weight: 700; line-height: 1.3;  margin: 8px 0 2px; }
+.clipo-richtext blockquote {
+  border-left: 3px solid #7C3AED;
+  padding: 6px 12px;
+  margin: 10px 0;
+  color: #374151;
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+.clipo-richtext ol { list-style: decimal; padding-left: 22px; margin: 6px 0; }
+.clipo-richtext ul { list-style: disc;    padding-left: 22px; margin: 6px 0; }
+.clipo-richtext li { margin: 3px 0; line-height: 1.5; }
+.clipo-richtext p { margin: 4px 0; line-height: 1.65; }
+.clipo-richtext[data-placeholder]:empty::before {
+  content: attr(data-placeholder);
+  color: #D1D5DB;
+  pointer-events: none;
+  font-weight: 400;
+}
+
+/* Title contenteditable */
+.clipo-title[data-placeholder]:empty::before {
+  content: attr(data-placeholder);
+  color: #D1D5DB;
+  pointer-events: none;
+}
+.clipo-title { outline: none; }
+
+/* ─── Drawing canvas ─────────────────────────────────────────────────────── */
+.dot-grid-bg {
+  background-image: radial-gradient(circle, #D1D5DB 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+/* ─── Voice waveform canvas ──────────────────────────────────────────────── */
+.waveform-canvas { image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; }
+
+/* ─── Equalizer animation ────────────────────────────────────────────────── */
+@keyframes equalizer {
+  0%   { transform: scaleY(0.25); }
+  100% { transform: scaleY(1.1); }
+}
+.animate-equalizer { animation: equalizer 0.6s ease-in-out infinite alternate; transform-origin: bottom; }
+
+/* ─── Orb / landing ──────────────────────────────────────────────────────── */
+@keyframes floatOrb {
+  0%, 100% { transform: translateY(0px) scale(1); }
+  50%       { transform: translateY(-20px) scale(1.05); }
+}
+.orb-animate      { animation: floatOrb 6s ease-in-out infinite; }
+.orb-animate-slow { animation: floatOrb 9s ease-in-out infinite reverse; }
+
+/* ─── Pulse ring ─────────────────────────────────────────────────────────── */
+@keyframes pulseRing {
+  0%   { transform: scale(1); opacity: 0.8; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+.pulse-ring::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: pulseRing 1.5s ease-out infinite;
+}
+
+/* ─── Highlight mark colours ─────────────────────────────────────────────── */
+mark[data-color="yellow"] { background: #FEF08A; border-radius: 2px; padding: 0 1px; }
+mark[data-color="purple"] { background: #EDE9FE; border-radius: 2px; padding: 0 1px; }
+mark[data-color="green"]  { background: #DCFCE7; border-radius: 2px; padding: 0 1px; }
+mark[data-color="orange"] { background: #FED7AA; border-radius: 2px; padding: 0 1px; }
+mark[data-color="pink"]   { background: #FCE7F3; border-radius: 2px; padding: 0 1px; }
