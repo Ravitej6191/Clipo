@@ -5,8 +5,8 @@
       "name": "clipo-dev",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
-      "port": 5173,
-      "autoPort": true
+      "port": 5176,
+      "autoPort": false
     }
   ]
 }

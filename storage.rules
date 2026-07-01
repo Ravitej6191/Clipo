@@ -1,0 +1,11 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /notes/{noteId}/{allPaths=**} {
+      // Anyone with the link can read files in a note
+      allow read: if true;
+      // Anyone can upload (collaborative editing)
+      allow write: if request.resource.size < 200 * 1024 * 1024; // 200MB max
+    }
+  }
+}

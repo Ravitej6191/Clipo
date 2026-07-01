@@ -2,9 +2,9 @@ import React, { useState } from 'react';
 import { useNotes } from '../contexts/NoteContext';
 import type { ClipoNote } from '../types';
 import {
-  Search, Plus, MoreHorizontal, Lock, Mic,
+  Search, Plus, Lock, Mic,
   CheckSquare, Image as ImageIcon, FileText, Link as LinkIcon, Code,
-  Pin, Globe,
+  Pin,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -50,8 +50,12 @@ const SpaceCard: React.FC<{
   const checklistAtt = note.attachments?.find(a => a.type === 'checklist');
   const attTypes = [...new Set(note.attachments?.map(a => a.type) ?? [])];
 
-  const formatDate = (iso: string) =>
-    new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+  const formatDate = (iso: string) => {
+    const d = new Date(iso);
+    const date = d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+    const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return `${date}, ${time}`;
+  };
 
   // Strip HTML for preview text
   const stripHtml = (html: string) => html.replace(/<[^>]*>/g, '');
@@ -122,21 +126,18 @@ const SpaceCard: React.FC<{
         )}
 
         {/* Footer */}
-        <div className="flex items-center justify-between mt-auto pt-1">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-col gap-1.5 mt-auto pt-1.5">
+          {/* Attachment icons + label row */}
+          <div className="flex items-center gap-1.5">
+            {attTypes.slice(0, 3).map(t => <AttIcon key={t} type={t} />)}
             {note.label && (
-              <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${getLabelColor(note.label)}`}>
+              <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ml-auto ${getLabelColor(note.label)}`}>
                 {note.label}
               </span>
             )}
-            {note.shared && !note.label && (
-              <Globe className="w-3 h-3 text-[#111827]" />
-            )}
           </div>
-          <div className="flex items-center gap-1.5">
-            {attTypes.slice(0, 3).map(t => <AttIcon key={t} type={t} />)}
-            <span className="text-[10px] text-gray-400 ml-1">{formatDate(note.updatedAt)}</span>
-          </div>
+          {/* Timestamp */}
+          <span className="text-[10px] text-gray-400">{formatDate(note.updatedAt)}</span>
         </div>
       </div>
     </motion.button>
@@ -147,11 +148,14 @@ const SpaceCard: React.FC<{
 interface Props {
   onOpenNote: (id: string) => void;
   onCreateNote: () => void;
+  user?: { displayName?: string | null; email?: string | null; photoURL?: string | null } | null;
+  onSignOut?: () => void;
 }
 
-export const SpacesListView: React.FC<Props> = ({ onOpenNote, onCreateNote }) => {
+export const SpacesListView: React.FC<Props> = ({ onOpenNote, onCreateNote, user, onSignOut }) => {
   const { notes } = useNotes();
   const [search, setSearch] = useState('');
+  const [showMenu, setShowMenu] = useState(false);
 
   const filtered = notes
     .filter(n => {
@@ -178,21 +182,57 @@ export const SpacesListView: React.FC<Props> = ({ onOpenNote, onCreateNote }) =>
   return (
     <div className="min-h-screen bg-[#FAF9F5] flex flex-col">
       {/* Header */}
-      <header className="sticky top-0 z-20 bg-[#FAF9F5]/95 backdrop-blur pt-safe px-5 pt-4 pb-3">
+      <header className="sticky top-0 z-20 bg-[#FAF9F5]/95 backdrop-blur px-5 pt-4 pb-3">
         <div className="flex items-center justify-between mb-4">
-          {/* Avatar */}
-          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#111827] to-[#7C3AED] flex items-center justify-center shrink-0">
-            <span className="text-white font-bold text-sm">C</span>
+          {/* Avatar with sign-out dropdown */}
+          <div className="relative">
+            <button onClick={() => setShowMenu(p => !p)} aria-label="Account"
+              className="w-10 h-10 rounded-full overflow-hidden border-2 border-white shadow-md focus:outline-none shrink-0">
+              {user?.photoURL
+                ? <img src={user.photoURL} alt={user.displayName ?? ''} className="w-full h-full object-cover" />
+                : <div className="w-full h-full bg-gradient-to-br from-[#111827] to-[#7C3AED] flex items-center justify-center">
+                    <span className="text-white font-bold text-sm">{(user?.displayName?.[0] ?? 'C').toUpperCase()}</span>
+                  </div>
+              }
+            </button>
+            <AnimatePresence>
+              {showMenu && (
+                <>
+                  <motion.div className="fixed inset-0 z-10" onClick={() => setShowMenu(false)}
+                    initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} />
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.95, y: -4 }} animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.95, y: -4 }} transition={{ duration: 0.12 }}
+                    className="absolute left-0 top-12 z-20 w-52 bg-white rounded-2xl shadow-soft-xl border border-gray-100 overflow-hidden"
+                  >
+                    <div className="px-4 py-3 border-b border-gray-50">
+                      <p className="text-xs font-bold text-[#111827] truncate">{user?.displayName ?? 'User'}</p>
+                      <p className="text-[10px] text-gray-400 truncate">{user?.email}</p>
+                    </div>
+                    <a href="/privacy" onClick={() => setShowMenu(false)}
+                      className="block px-4 py-3 text-xs font-semibold text-[#6B7280] hover:bg-gray-50 transition-colors border-b border-gray-50">
+                      Privacy Policy
+                    </a>
+                    {onSignOut && (
+                      <button onClick={() => { setShowMenu(false); onSignOut(); }}
+                        className="w-full text-left px-4 py-3 text-xs font-semibold text-red-500 hover:bg-red-50 transition-colors">
+                        Sign out
+                      </button>
+                    )}
+                  </motion.div>
+                </>
+              )}
+            </AnimatePresence>
           </div>
 
           <h1 className="text-lg font-black text-[#111827]">My Spaces</h1>
 
           <button
             onClick={onCreateNote}
-            aria-label="More options"
-            className="w-10 h-10 rounded-full bg-white border border-gray-200 flex items-center justify-center shadow-sm"
+            aria-label="New space"
+            className="w-10 h-10 rounded-full bg-gradient-to-br from-[#111827] to-[#7C3AED] flex items-center justify-center shadow-sm"
           >
-            <MoreHorizontal className="w-4 h-4 text-[#6B7280]" />
+            <Plus className="w-5 h-5 text-white stroke-[2.5]" />
           </button>
         </div>
 
@@ -281,15 +321,6 @@ export const SpacesListView: React.FC<Props> = ({ onOpenNote, onCreateNote }) =>
         )}
       </main>
 
-      {/* FAB */}
-      <motion.button
-        onClick={onCreateNote}
-        whileTap={{ scale: 0.95 }}
-        aria-label="Create new space"
-        className="fixed bottom-8 right-5 w-14 h-14 bg-gradient-to-br from-[#111827] to-[#7C3AED] text-white rounded-full shadow-xl flex items-center justify-center z-30"
-      >
-        <Plus className="w-6 h-6 stroke-[2.5]" />
-      </motion.button>
     </div>
   );
 };

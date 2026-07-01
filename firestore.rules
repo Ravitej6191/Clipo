@@ -1,0 +1,18 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /notes/{noteId} {
+      // Anyone with the link can read (public collaboration)
+      allow read: if true;
+
+      // Anyone can create a note (link generation works without auth)
+      allow create: if true;
+
+      // Anyone can update a note (real-time collaboration)
+      allow update: if true;
+
+      // Only the creator can delete
+      allow delete: if request.auth != null && request.auth.uid == resource.data.userId;
+    }
+  }
+}

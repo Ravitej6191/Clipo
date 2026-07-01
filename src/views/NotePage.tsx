@@ -9,16 +9,36 @@ import { useUI } from '../contexts/UIContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ChevronLeft, Check, MoreHorizontal, Play, Pause, Download,
-  ExternalLink, Plus, Share2, Lock, Copy, Trash2,
+  ExternalLink, Share2, Lock, Copy, Trash2,
   Image as ImageIcon, Mic, FileText, Link as LinkIcon, Video as VideoIcon,
   Code, PenLine, ListChecks, Type, Eye, EyeOff,
   Bold, Italic, Underline, Strikethrough, List, ListOrdered,
   Heading1, Heading2, Heading3, AlignLeft, AlignCenter, AlignRight,
   AlignJustify, Indent, Outdent, Highlighter,
-  ChevronUp, ChevronDown, X, Hash,
+  ChevronUp, ChevronDown, X, Hash, Loader2, Plus,
+  Table2, Minus, Circle, ListOrdered as ListNumbered,
 } from 'lucide-react';
+import { uploadToCloudinary, deleteFromCloudinary } from '../services/cloudinary';
+import imageCompression from 'browser-image-compression';
+import hljs from 'highlight.js/lib/core';
+import javascript from 'highlight.js/lib/languages/javascript';
+import typescript from 'highlight.js/lib/languages/typescript';
+import python from 'highlight.js/lib/languages/python';
+import css from 'highlight.js/lib/languages/css';
+import xml from 'highlight.js/lib/languages/xml';
+import json from 'highlight.js/lib/languages/json';
+import bash from 'highlight.js/lib/languages/bash';
+import 'highlight.js/styles/tokyo-night-dark.css';
 
-// ─── File validation constants ────────────────────────────────────────────────
+hljs.registerLanguage('javascript', javascript);
+hljs.registerLanguage('typescript', typescript);
+hljs.registerLanguage('python', python);
+hljs.registerLanguage('css', css);
+hljs.registerLanguage('html', xml);
+hljs.registerLanguage('json', json);
+hljs.registerLanguage('bash', bash);
+
+// ─── File validation ──────────────────────────────────────────────────────────
 const ALLOWED_TYPES: Record<'image' | 'video' | 'file', string[]> = {
   image: ['image/jpeg','image/jpg','image/png','image/gif','image/webp','image/svg+xml'],
   video: ['video/mp4','video/webm','video/ogg','video/quicktime','video/x-msvideo'],
@@ -32,7 +52,7 @@ const ALLOWED_TYPES: Record<'image' | 'video' | 'file', string[]> = {
     'text/plain','application/zip','text/csv',
   ],
 };
-const MAX_MB: Record<'image' | 'video' | 'file', number> = { image: 10, video: 100, file: 50 };
+const MAX_MB: Record<'image' | 'video' | 'file', number> = { image: 10, video: 200, file: 50 };
 const EXT_LABELS: Record<'image' | 'video' | 'file', string> = {
   image: 'JPG, PNG, GIF, WebP, SVG',
   video: 'MP4, WebM, OGG, MOV',
@@ -48,7 +68,41 @@ const fmtDate = (iso: string) =>
     weekday: 'short', month: 'long', day: 'numeric', year: 'numeric',
   });
 
+// ─── Upload helper (Cloudinary) ───────────────────────────────────────────────
+async function uploadFile(
+  blob: Blob,
+  fileName: string,
+  onProgress?: (pct: number) => void,
+): Promise<{ url: string; publicId: string }> {
+  return uploadToCloudinary(blob, fileName, onProgress);
+}
 
+// MIME type lookup for Cloudinary deletion
+function mimeForAtt(att: Attachment): string {
+  if (att.type === 'image') return 'image/jpeg';
+  if (att.type === 'video') return 'video/mp4';
+  if (att.type === 'voice') return 'audio/webm';
+  return 'application/octet-stream';
+}
+
+// ─── Open Graph link preview ──────────────────────────────────────────────────
+async function fetchLinkMeta(url: string): Promise<{ title: string; description?: string; image?: string }> {
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(`https://api.microlink.io/?url=${encodeURIComponent(url)}&screenshot=false`, { signal: controller.signal });
+    const json = await res.json();
+    if (json.status === 'success') {
+      return {
+        title: json.data?.title || url,
+        description: json.data?.description || '',
+        image: json.data?.image?.url || '',
+      };
+    }
+  } catch { /* timeout or network — fall through */ }
+  finally { clearTimeout(tid); }
+  return { title: url };
+}
 
 // ─── Bottom sheet wrapper ─────────────────────────────────────────────────────
 const Sheet: React.FC<{
@@ -60,11 +114,8 @@ const Sheet: React.FC<{
   <AnimatePresence>
     {open && (
       <>
-        <motion.div
-          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-          className="fixed inset-0 bg-black/30 backdrop-blur-sm z-40"
-          onClick={onClose}
-        />
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+          className="fixed inset-0 bg-black/30 backdrop-blur-sm z-40" onClick={onClose} />
         <motion.div
           initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
           transition={{ type: 'spring', damping: 28, stiffness: 320 }}
@@ -93,17 +144,96 @@ const Sheet: React.FC<{
 const WaveformBars: React.FC<{ waveform: number[]; playing?: boolean }> = ({ waveform, playing }) => (
   <div className="flex items-end gap-[2px] flex-1 h-8" aria-hidden="true">
     {waveform.map((h, i) => (
-      <div
-        key={i}
+      <div key={i}
         className={`flex-1 bg-white/80 rounded-full min-h-[15%] ${playing ? 'animate-equalizer' : ''}`}
-        style={{
-          height: `${Math.max(15, h)}%`,
-          animationDelay: playing ? `${(i % 5) * 0.12}s` : undefined,
-        }}
+        style={{ height: `${Math.max(15, h)}%`, animationDelay: playing ? `${(i % 5) * 0.12}s` : undefined }}
       />
     ))}
   </div>
 );
+
+// ─── Upload progress ring ─────────────────────────────────────────────────────
+const UploadProgress: React.FC<{ pct: number }> = ({ pct }) => (
+  <div className="absolute inset-0 flex items-center justify-center bg-black/40 rounded-2xl">
+    <div className="flex flex-col items-center gap-1.5">
+      <svg className="w-10 h-10 -rotate-90" viewBox="0 0 40 40">
+        <circle cx="20" cy="20" r="16" fill="none" stroke="white" strokeOpacity="0.3" strokeWidth="3" />
+        <circle cx="20" cy="20" r="16" fill="none" stroke="white" strokeWidth="3"
+          strokeDasharray={`${pct} ${100 - pct}`} strokeDashoffset="0"
+          pathLength="100" strokeLinecap="round" />
+      </svg>
+      <span className="text-white text-[10px] font-bold">{Math.round(pct)}%</span>
+    </div>
+  </div>
+);
+
+// ─── Code block with syntax highlighting ─────────────────────────────────────
+const CODE_LANGS = ['javascript','typescript','python','css','html','json','bash','other'];
+
+const CodeBlock: React.FC<{
+  att: Attachment;
+  onChange: (content: string) => void;
+  onLanguageChange: (lang: string) => void;
+}> = ({ att, onChange, onLanguageChange }) => {
+  const [editing, setEditing] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const highlighted = att.codeLanguage && att.codeLanguage !== 'other' && att.content
+    ? hljs.highlight(att.content, { language: att.codeLanguage, ignoreIllegals: true }).value
+    : hljs.highlightAuto(att.content || '').value;
+
+  useEffect(() => {
+    if (editing && textareaRef.current) {
+      textareaRef.current.focus();
+      textareaRef.current.selectionStart = textareaRef.current.value.length;
+    }
+  }, [editing]);
+
+  return (
+    <div className="bg-[#1a1b2e] rounded-2xl overflow-hidden shadow-sm">
+      <div className="px-4 py-2 bg-white/5 flex items-center justify-between gap-2">
+        {/* Inline language dropdown */}
+        <select
+          value={att.codeLanguage || 'javascript'}
+          onChange={e => onLanguageChange(e.target.value)}
+          className="bg-transparent text-[11px] font-mono text-white/50 outline-none cursor-pointer hover:text-white/80 transition-colors pr-4"
+        >
+          {CODE_LANGS.map(l => <option key={l} value={l} style={{ background: '#1a1b2e' }}>{l}</option>)}
+        </select>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setEditing(e => !e)} aria-label={editing ? 'Preview' : 'Edit'}
+            className="text-xs text-white/40 hover:text-white/80 flex items-center gap-1 transition-colors">
+            {editing ? <Eye className="w-3 h-3" /> : <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>}
+            {editing ? 'Preview' : 'Edit'}
+          </button>
+          <div className="w-px h-3 bg-white/10" />
+          <button onClick={() => { navigator.clipboard.writeText(att.content); }}
+            aria-label="Copy code" className="text-xs text-white/40 hover:text-white/80 flex items-center gap-1 transition-colors">
+            <Copy className="w-3 h-3" /> Copy
+          </button>
+        </div>
+      </div>
+      {editing ? (
+        <textarea
+          ref={textareaRef}
+          value={att.content}
+          onChange={e => onChange(e.target.value)}
+          onBlur={() => setEditing(false)}
+          spellCheck={false}
+          aria-label="Code editor"
+          rows={Math.max(4, (att.content.match(/\n/g)?.length ?? 0) + 1)}
+          className="w-full bg-transparent text-xs font-mono text-[#A9B1D6] px-4 py-3 resize-none outline-none leading-relaxed max-h-80 overflow-y-auto"
+          style={{ caretColor: '#A9B1D6' }}
+        />
+      ) : (
+        <pre
+          onClick={() => setEditing(true)}
+          className="text-xs font-mono p-4 overflow-x-auto leading-relaxed max-h-80 cursor-text"
+          dangerouslySetInnerHTML={{ __html: highlighted || '// Your code here' }}
+        />
+      )}
+    </div>
+  );
+};
 
 // ─── Checklist block ──────────────────────────────────────────────────────────
 const ChecklistBlock: React.FC<{
@@ -111,34 +241,56 @@ const ChecklistBlock: React.FC<{
   onToggle: (attId: string, itemId: string) => void;
   onAddItem: (attId: string, text: string, isSection?: boolean) => void;
   onDeleteItem: (attId: string, itemId: string) => void;
-}> = ({ att, onToggle, onAddItem, onDeleteItem }) => {
+  onRenameItem: (attId: string, itemId: string, text: string) => void;
+}> = ({ att, onToggle, onAddItem, onDeleteItem, onRenameItem }) => {
   const [newText, setNewText] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
   const items = att.checklistItems ?? [];
   let sectionIdx = 0;
 
+  const done = items.filter(i => !i.isSection && i.completed).length;
+  const total = items.filter(i => !i.isSection).length;
+
   return (
     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 flex flex-col gap-2">
+      {total > 0 && (
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[10px] font-bold text-[#9CA3AF] uppercase tracking-wider">
+            {done}/{total} done
+          </span>
+          <div className="flex-1 mx-3 h-1 bg-gray-100 rounded-full overflow-hidden">
+            <div className="h-full bg-gradient-to-r from-[#111827] to-[#7C3AED] rounded-full transition-all duration-300"
+              style={{ width: `${total > 0 ? (done / total) * 100 : 0}%` }} />
+          </div>
+        </div>
+      )}
+
       {items.map(item => {
         if (item.isSection) {
           sectionIdx++;
-          const num = sectionIdx;
           return (
-            <div key={item.id} className="flex items-center justify-between mt-2 first:mt-0">
-              <span className="text-sm font-bold text-[#111827]">{num}. {item.text}</span>
+            <div key={item.id} className="flex items-center gap-2 mt-2 first:mt-0 group/sec">
+              <span className="text-xs font-bold text-[#9CA3AF] shrink-0">{sectionIdx}.</span>
+              <input
+                className="flex-1 text-xs font-bold text-[#111827] uppercase tracking-wide bg-transparent outline-none placeholder:text-gray-300"
+                value={item.text}
+                placeholder="Section heading"
+                onChange={e => onRenameItem(att.id, item.id, e.target.value)}
+              />
               <button onClick={() => onDeleteItem(att.id, item.id)} aria-label="Remove section"
-                className="w-6 h-6 flex items-center justify-center text-gray-300 hover:text-red-400">
+                className="opacity-0 group-hover/sec:opacity-100 transition-opacity w-6 h-6 flex items-center justify-center text-gray-300 active:text-red-400 shrink-0">
                 <X className="w-3.5 h-3.5" />
               </button>
             </div>
           );
         }
         return (
-          <div key={item.id} className="flex items-center gap-3 group">
+          <div key={item.id} className="flex items-center gap-3">
             <button onClick={() => onToggle(att.id, item.id)}
               aria-label={item.completed ? 'Mark incomplete' : 'Mark complete'}
               className="shrink-0">
               {item.completed ? (
-                <div className="w-5 h-5 rounded-full bg-[#111827] flex items-center justify-center">
+                <div className="w-5 h-5 rounded-full bg-gradient-to-br from-[#111827] to-[#7C3AED] flex items-center justify-center">
                   <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"/>
                   </svg>
@@ -158,10 +310,11 @@ const ChecklistBlock: React.FC<{
         );
       })}
 
-      {/* Add new item row */}
+      {/* Add new item */}
       <div className="flex items-center gap-2 mt-1 pt-2 border-t border-gray-50">
         <div className="w-5 h-5 rounded-full border-2 border-gray-200 shrink-0" />
         <input
+          ref={inputRef}
           value={newText}
           onChange={e => setNewText(e.target.value)}
           onKeyDown={e => {
@@ -174,9 +327,9 @@ const ChecklistBlock: React.FC<{
           className="flex-1 text-sm text-[#374151] placeholder:text-gray-300 outline-none bg-transparent"
         />
         {newText.trim() && (
-          <button onClick={() => { onAddItem(att.id, newText.trim()); setNewText(''); }}
+          <button onClick={() => { onAddItem(att.id, newText.trim()); setNewText(''); inputRef.current?.focus(); }}
             aria-label="Add item"
-            className="w-6 h-6 rounded-full bg-[#111827] flex items-center justify-center">
+            className="w-6 h-6 rounded-full bg-gradient-to-br from-[#111827] to-[#7C3AED] flex items-center justify-center">
             <Check className="w-3 h-3 text-white stroke-[3]" />
           </button>
         )}
@@ -194,41 +347,48 @@ interface NotePageProps {
   onBack: () => void;
 }
 
-const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
-  const { notes, updateNote, deleteNote } = useNotes();
-  const { showToast, showConfirm } = useUI();
-  const note = notes.find(n => n.id === noteId);
+type ToolTab = 'media' | 'list' | 'format' | 'code';
 
-  // ── Contenteditable refs (avoid cursor-reset by never re-setting innerHTML) ──
+const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
+  const { notes, updateNote, deleteNote, subscribeSharedNote } = useNotes();
+  const { showToast, showConfirm } = useUI();
+
+  // ── Live note state (via Firestore onSnapshot or localStorage) ────────────
+  const [note, setNote] = useState<Parameters<typeof updateNote>[1] & { id: string; updatedAt: string; password?: string } | null>(null);
+
   const titleRef    = useRef<HTMLDivElement>(null);
   const bodyRef     = useRef<HTMLDivElement>(null);
   const initialized = useRef(false);
+  const domSeeded   = useRef(false);
 
-  // ── Local state ──────────────────────────────────────────────────────────────
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // ── Local state ──────────────────────────────────────────────────────────
+  const [noteNotFound, setNoteNotFound] = useState(false);
+  const [attachments, setAttachments]   = useState<Attachment[]>([]);
   const [notePassword, setNotePassword] = useState('');
-  const [playingId, setPlayingId]     = useState<string | null>(null);
+  const [playingId, setPlayingId]       = useState<string | null>(null);
   const playAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Sheet visibility
-  const [showContext, setShowContext]       = useState(false);
-  const [showVoice, setShowVoice]           = useState(false);
-  const [showDrawing, setShowDrawing]       = useState(false);
-  const [showLinkSheet, setShowLinkSheet]   = useState(false);
-  const [linkInput, setLinkInput]           = useState('');
-  const [showExitWarn, setShowExitWarn]     = useState(false);
+  // Upload progress map: attId → percentage
+  const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
 
-  // Bottom toolbar active tab ('media' | 'list' | 'format' | 'code' | null)
-  type ToolTab = 'media' | 'list' | 'format' | 'code';
+  // Sheet visibility
+  const [showContext, setShowContext]     = useState(false);
+  const [showVoice, setShowVoice]         = useState(false);
+  const [showDrawing, setShowDrawing]     = useState(false);
+  const [showLinkSheet, setShowLinkSheet] = useState(false);
+  const [linkInput, setLinkInput]         = useState('');
+  const [linkLoading, setLinkLoading]     = useState(false);
+  const [showExitWarn, setShowExitWarn]   = useState(false);
+
+  // Bottom toolbar
   const [activeTab, setActiveTab] = useState<ToolTab | null>(null);
-  const [codeLang, setCodeLang]   = useState('javascript');
 
   // Save status
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving'>('saved');
 
   // Lock screen
-  const [locked, setLocked]           = useState(false);
-  const [unlockInput, setUnlockInput] = useState('');
+  const [locked, setLocked]             = useState(false);
+  const [unlockInput, setUnlockInput]   = useState('');
   const [showUnlockPw, setShowUnlockPw] = useState(false);
 
   // File input refs
@@ -236,50 +396,109 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
   const videoInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef  = useRef<HTMLInputElement>(null);
 
-  // Auto-save timer
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // ── Init ──────────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    initialized.current = false;
-  }, [noteId]);
+  // Reset initialization flags whenever noteId changes (different note opened)
+  useEffect(() => { initialized.current = false; domSeeded.current = false; }, [noteId]);
 
+  // ── Effect 1: seed React state from local notes (fires when notes updates) ──
+  // Sets initialized = true immediately so the Firestore subscription can't
+  // overwrite with a stale cached snapshot. DOM refs may still be null here
+  // (editor only mounts after note state becomes non-null) — Effect 2 handles that.
   useEffect(() => {
-    if (!note) return;
-    if (!initialized.current) {
-      if (titleRef.current)  titleRef.current.textContent  = note.title   || '';
-      if (bodyRef.current)   bodyRef.current.innerHTML     = note.content  || '';
+    const local = notes.find(n => n.id === noteId);
+    if (local && !initialized.current) {
+      setNote(local as any);
+      setNotePassword(local.password ?? '');
+      setAttachments(local.attachments ?? []);
       initialized.current = true;
+      const key = `clipo_verified_${noteId}`;
+      if (local.password && !sessionStorage.getItem(key)) setLocked(true);
     }
-    setAttachments(note.attachments ?? []);
-    setNotePassword(note.password ?? '');
-    const key = `clipo_verified_${noteId}`;
-    if (note.password && !sessionStorage.getItem(key)) setLocked(true);
-  }, [note, noteId]);
+  }, [noteId, notes]);
 
+  // ── Effect 2: seed DOM refs once editor mounts ────────────────────────────
+  // The editor only renders after `note` becomes non-null (Effect 1 above sets
+  // it). This effect fires after that render, when titleRef/bodyRef are live.
+  useEffect(() => {
+    if (domSeeded.current || !note) return;
+    if (!titleRef.current || !bodyRef.current) return;
+    titleRef.current.textContent = (note as any).title || '';
+    bodyRef.current.innerHTML   = (note as any).content || '';
+    domSeeded.current = true;
+  }, [note]);
 
-  // ── Auto-save ─────────────────────────────────────────────────────────────────
+  // ── Subscribe to real-time note updates ──────────────────────────────────
+  useEffect(() => {
+    setNoteNotFound(false);
+
+    // Timeout: if note hasn't loaded in 10s, assume not found
+    const notFoundTimer = setTimeout(() => {
+      if (!initialized.current) setNoteNotFound(true);
+    }, 10000);
+
+    const unsub = subscribeSharedNote(
+      noteId,
+      (n) => {
+        if (!n) {
+          if (!initialized.current) {
+            setNoteNotFound(true);
+          }
+          clearTimeout(notFoundTimer);
+          return;
+        }
+        clearTimeout(notFoundTimer);
+        setNote(n as any);
+        if (!initialized.current) {
+          // First load via Firestore — covers shared/guest notes not in local notes state.
+          // Effect 2 will populate the DOM once the editor mounts after setNote triggers a re-render.
+          setNotePassword(n.password ?? '');
+          setAttachments(n.attachments ?? []);
+          initialized.current = true;
+          const key = `clipo_verified_${noteId}`;
+          if (n.password && !sessionStorage.getItem(key)) setLocked(true);
+        }
+      },
+      () => {
+        clearTimeout(notFoundTimer);
+        if (!initialized.current) setNoteNotFound(true);
+      },
+    );
+
+    return () => { unsub(); clearTimeout(notFoundTimer); };
+  }, [noteId, subscribeSharedNote]);
+
+  // ── Auto-save ────────────────────────────────────────────────────────────
   const scheduleAutoSave = useCallback((newAtts?: Attachment[]) => {
     setSaveStatus('saving');
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => {
+    saveTimerRef.current = setTimeout(async () => {
       const title   = titleRef.current?.textContent?.trim() || '';
       const content = bodyRef.current?.innerHTML || '';
-      updateNote(noteId, {
-        title, content,
-        attachments: newAtts ?? attachments,
-        updatedAt: new Date().toISOString(),
-      });
+      try {
+        await updateNote(noteId, {
+          title, content,
+          attachments: newAtts ?? attachments,
+          updatedAt: new Date().toISOString(),
+        });
+      } catch { /* retain last saved state on Firestore error */ }
       setSaveStatus('saved');
     }, 1000);
   }, [noteId, updateNote, attachments]);
 
-  // ── Save + back ───────────────────────────────────────────────────────────────
-  const doSaveAndBack = () => {
+  // Clear pending auto-save timer on unmount to avoid state updates after navigation
+  useEffect(() => {
+    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
+  }, []);
+
+  // ── Save + back ──────────────────────────────────────────────────────────
+  const doSaveAndBack = async () => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     const title   = titleRef.current?.textContent?.trim() || '';
     const content = bodyRef.current?.innerHTML || '';
-    updateNote(noteId, { title, content, attachments, updatedAt: new Date().toISOString() });
+    try {
+      await updateNote(noteId, { title, content, attachments, updatedAt: new Date().toISOString() });
+    } catch { /* ignore — note stays in Firestore from last successful auto-save */ }
     setSaveStatus('saved');
     onBack();
   };
@@ -289,18 +508,17 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
     doSaveAndBack();
   };
 
-  // ── Unlock ───────────────────────────────────────────────────────────────────
+  // ── Unlock ───────────────────────────────────────────────────────────────
   const handleUnlock = () => {
     if (unlockInput === notePassword) {
       sessionStorage.setItem(`clipo_verified_${noteId}`, '1');
-      setLocked(false);
-      setUnlockInput('');
+      setLocked(false); setUnlockInput('');
     } else {
       showToast('Incorrect password', 'error');
     }
   };
 
-  // ── Attachments ───────────────────────────────────────────────────────────────
+  // ── Attachment helpers ───────────────────────────────────────────────────
   const addAttachment = (att: Attachment) => {
     const next = [...attachments, att];
     setAttachments(next);
@@ -311,12 +529,16 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
 
   const removeAttachment = (id: string) => {
     showConfirm({
-      title: 'Remove this item?',
-      message: '',
+      title: 'Remove this item?', message: '',
       onConfirm: () => {
+        const att = attachments.find(a => a.id === id);
         const next = attachments.filter(a => a.id !== id);
         setAttachments(next);
         scheduleAutoSave(next);
+        // Best-effort Cloudinary delete for uploaded media
+        if (att?.cloudinaryPublicId) {
+          deleteFromCloudinary(att.cloudinaryPublicId, mimeForAtt(att));
+        }
       },
     });
   };
@@ -368,14 +590,128 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
     });
   };
 
-  // ── File upload ───────────────────────────────────────────────────────────────
+  const renameCheckItem = (attId: string, itemId: string, text: string) => {
+    setAttachments(prev => {
+      const next = prev.map(a => a.id !== attId ? a : {
+        ...a,
+        checklistItems: a.checklistItems?.map(i => i.id === itemId ? { ...i, text } : i),
+      });
+      scheduleAutoSave(next);
+      return next;
+    });
+  };
+
+  // ── List block helpers (bullet / numbered) ──────────────────────────────
+  const addListItem = (attId: string) => {
+    setAttachments(prev => {
+      const next = prev.map(a => a.id !== attId ? a : {
+        ...a, listItems: [...(a.listItems ?? []), ''],
+      });
+      scheduleAutoSave(next);
+      return next;
+    });
+  };
+
+  const updateListItem = (attId: string, idx: number, value: string) => {
+    setAttachments(prev => {
+      const next = prev.map(a => a.id !== attId ? a : {
+        ...a, listItems: a.listItems?.map((it, i) => i === idx ? value : it),
+      });
+      scheduleAutoSave(next);
+      return next;
+    });
+  };
+
+  const removeListItem = (attId: string, idx: number) => {
+    setAttachments(prev => {
+      const next = prev.map(a => a.id !== attId ? a : {
+        ...a, listItems: a.listItems?.filter((_, i) => i !== idx),
+      });
+      scheduleAutoSave(next);
+      return next;
+    });
+  };
+
+  // ── Table helpers ────────────────────────────────────────────────────────
+  const updateTableCell = (attId: string, row: number, col: number, value: string) => {
+    setAttachments(prev => {
+      const next = prev.map(a => {
+        if (a.id !== attId || !a.tableData) return a;
+        const cells = a.tableData.cells.map((r, ri) =>
+          r.map((c, ci) => (ri === row && ci === col) ? value : c));
+        return { ...a, tableData: { ...a.tableData, cells } };
+      });
+      scheduleAutoSave(next);
+      return next;
+    });
+  };
+
+  const addTableRow = (attId: string) => {
+    setAttachments(prev => {
+      const next = prev.map(a => {
+        if (a.id !== attId || !a.tableData) return a;
+        const emptyRow = Array(a.tableData.cols).fill('');
+        return { ...a, tableData: { ...a.tableData, rows: a.tableData.rows + 1, cells: [...a.tableData.cells, emptyRow] } };
+      });
+      scheduleAutoSave(next);
+      return next;
+    });
+  };
+
+  const addTableCol = (attId: string) => {
+    setAttachments(prev => {
+      const next = prev.map(a => {
+        if (a.id !== attId || !a.tableData) return a;
+        const cells = a.tableData.cells.map(r => [...r, '']);
+        return { ...a, tableData: { ...a.tableData, cols: a.tableData.cols + 1, cells } };
+      });
+      scheduleAutoSave(next);
+      return next;
+    });
+  };
+
+  const removeTableRow = (attId: string, rowIdx: number) => {
+    setAttachments(prev => {
+      const next = prev.map(a => {
+        if (a.id !== attId || !a.tableData || a.tableData.rows <= 1) return a;
+        const cells = a.tableData.cells.filter((_, i) => i !== rowIdx);
+        return { ...a, tableData: { ...a.tableData, rows: a.tableData.rows - 1, cells } };
+      });
+      scheduleAutoSave(next);
+      return next;
+    });
+  };
+
+  const removeTableCol = (attId: string, colIdx: number) => {
+    setAttachments(prev => {
+      const next = prev.map(a => {
+        if (a.id !== attId || !a.tableData || a.tableData.cols <= 1) return a;
+        const cells = a.tableData.cells.map(r => r.filter((_, i) => i !== colIdx));
+        return { ...a, tableData: { ...a.tableData, cols: a.tableData.cols - 1, cells } };
+      });
+      scheduleAutoSave(next);
+      return next;
+    });
+  };
+
+  const toggleTableHeader = (attId: string) => {
+    setAttachments(prev => {
+      const next = prev.map(a => a.id !== attId || !a.tableData ? a : {
+        ...a, tableData: { ...a.tableData, hasHeader: !a.tableData.hasHeader },
+      });
+      scheduleAutoSave(next);
+      return next;
+    });
+  };
+
+  // ── File upload to Firebase Storage ─────────────────────────────────────
   const triggerFile = (type: 'image' | 'video' | 'file') => {
-    const ref = type === 'image' ? imageInputRef : type === 'video' ? videoInputRef : fileInputRef;
-    if (ref.current) { ref.current.value = ''; ref.current.click(); }
+    const r = type === 'image' ? imageInputRef : type === 'video' ? videoInputRef : fileInputRef;
+    if (r.current) { r.current.value = ''; r.current.click(); }
     setActiveTab(null);
   };
 
-  const handleFileSelected = (type: 'image' | 'video' | 'file', file?: File) => {
+  const handleFileSelected = async (type: 'image' | 'video' | 'file', file?: File) => {
     if (!file) return;
     if (!ALLOWED_TYPES[type].includes(file.type)) {
       showToast(`Unsupported format. Allowed: ${EXT_LABELS[type]}`, 'error'); return;
@@ -384,27 +720,72 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
     if (sizeMB > MAX_MB[type]) {
       showToast(`File too large. Max ${MAX_MB[type]} MB for ${type}s.`, 'error'); return;
     }
-    if (type === 'image') {
-      const reader = new FileReader();
-      reader.onload = e => addAttachment({
-        id: uid(), type: 'image', content: e.target?.result as string,
-        fileName: file.name, fileSize: `${sizeMB.toFixed(1)} MB`,
-      });
-      reader.readAsDataURL(file);
-    } else if (type === 'video') {
-      addAttachment({ id: uid(), type: 'video', content: URL.createObjectURL(file),
-        fileName: file.name, fileSize: `${sizeMB.toFixed(1)} MB` });
-    } else {
-      addAttachment({ id: uid(), type: 'file', content: '',
-        fileName: file.name, fileSize: `${sizeMB.toFixed(1)} MB`, fileType: file.type });
+
+    const attId = uid();
+    const placeholder: Attachment = {
+      id: attId, type: type as any,
+      content: '',
+      fileName: file.name,
+      fileSize: `${sizeMB.toFixed(1)} MB`,
+      ...(type === 'file' ? { fileType: file.type } : {}),
+    };
+
+    // Show placeholder immediately
+    const withPlaceholder = [...attachments, placeholder];
+    setAttachments(withPlaceholder);
+
+    try {
+      let blob: Blob = file;
+
+      // Compress images before upload
+      if (type === 'image') {
+        blob = await imageCompression(file, {
+          maxSizeMB: 2,
+          maxWidthOrHeight: 2048,
+          useWebWorker: true,
+        });
+      }
+
+      const { url, publicId } = await uploadFile(
+        blob, file.name,
+        (pct) => setUploadProgress(prev => ({ ...prev, [attId]: pct })),
+      );
+
+      setUploadProgress(prev => { const n = { ...prev }; delete n[attId]; return n; });
+
+      const finalAtts = withPlaceholder.map(a =>
+        a.id === attId ? { ...a, content: url, cloudinaryPublicId: publicId || undefined } : a,
+      );
+      setAttachments(finalAtts);
+      scheduleAutoSave(finalAtts);
+    } catch (err) {
+      console.error('[upload]', err);
+      showToast('Upload failed. Try again.', 'error');
+      const without = withPlaceholder.filter(a => a.id !== attId);
+      setAttachments(without);
+      setUploadProgress(prev => { const n = { ...prev }; delete n[attId]; return n; });
     }
   };
 
-  // ── Audio playback ────────────────────────────────────────────────────────────
+  // ── Voice upload ─────────────────────────────────────────────────────────
+  const handleVoiceSave = async (url: string, dur: number, wf: number[]) => {
+    const attId = uid();
+    try {
+      const blob = await fetch(url).then(r => r.blob());
+      const { url: storageUrl, publicId } = await uploadFile(blob, 'voice.webm',
+        (pct) => setUploadProgress(prev => ({ ...prev, [attId]: pct })),
+      );
+      setUploadProgress(prev => { const n = { ...prev }; delete n[attId]; return n; });
+      addAttachment({ id: attId, type: 'voice', content: storageUrl, duration: dur, waveform: wf, cloudinaryPublicId: publicId || undefined });
+    } catch {
+      showToast('Voice upload failed.', 'error');
+    }
+  };
+
+  // ── Audio playback ───────────────────────────────────────────────────────
   const toggleAudio = (att: Attachment) => {
     if (playingId === att.id) {
-      playAudioRef.current?.pause();
-      setPlayingId(null);
+      playAudioRef.current?.pause(); setPlayingId(null);
     } else {
       playAudioRef.current?.pause();
       const audio = new Audio(att.content);
@@ -415,40 +796,64 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
     }
   };
 
-  // ── Rich text formatting ──────────────────────────────────────────────────────
+  // ── Rich text formatting ─────────────────────────────────────────────────
   const execFormat = (cmd: string, value?: string) => {
     bodyRef.current?.focus();
     document.execCommand(cmd, false, value ?? undefined);
   };
 
-  // ── Share ────────────────────────────────────────────────────────────────────
+  // ── Link with OG preview ─────────────────────────────────────────────────
+  const handleAddLink = async () => {
+    if (!linkInput.trim()) return;
+    setLinkLoading(true);
+    const meta = await fetchLinkMeta(linkInput.trim());
+    setLinkLoading(false);
+    addAttachment({
+      id: uid(), type: 'link',
+      content: linkInput.trim(),
+      linkTitle: meta.title,
+      linkDescription: meta.description,
+      linkImage: meta.image,
+    });
+    setShowLinkSheet(false);
+    setLinkInput('');
+  };
+
+  // ── Share ────────────────────────────────────────────────────────────────
   const shareLink = () => {
     const url = `${window.location.origin}${window.location.pathname}?share=${noteId}`;
-    navigator.clipboard.writeText(url).then(() => showToast('Share link copied!', 'success'));
+    navigator.clipboard.writeText(url)
+      .then(() => showToast('Link copied!', 'success'))
+      .catch(() => showToast('Could not copy — try manually', 'error'));
     setShowContext(false);
   };
 
-  // ── Delete ────────────────────────────────────────────────────────────────────
+  // ── Delete ───────────────────────────────────────────────────────────────
   const handleDelete = () => {
     setShowContext(false);
     showConfirm({
-      title: 'Delete Space',
-      message: 'This cannot be undone.',
-      confirmLabel: 'Delete',
-      isDanger: true,
+      title: 'Delete Space', message: 'This cannot be undone.',
+      confirmLabel: 'Delete', isDanger: true,
       onConfirm: () => {
-        deleteNote(noteId);
-        onBack();
+        // Delete all Cloudinary assets first (best-effort, non-blocking)
+        attachments.forEach(att => {
+          if (att.cloudinaryPublicId) {
+            deleteFromCloudinary(att.cloudinaryPublicId, mimeForAtt(att));
+          }
+        });
+        deleteNote(noteId)
+          .then(() => onBack())
+          .catch(() => showToast('Delete failed. Try again.', 'error'));
       },
     });
   };
 
-  // ── Lock screen ──────────────────────────────────────────────────────────────
+  // ── Lock screen ──────────────────────────────────────────────────────────
   if (locked) {
     return (
       <div className="min-h-screen bg-white flex flex-col items-center justify-center px-8 gap-6">
-        <div className="w-16 h-16 rounded-3xl bg-[#F3F4F6] flex items-center justify-center">
-          <Lock className="w-7 h-7 text-[#6B7280]" />
+        <div className="w-16 h-16 rounded-3xl bg-gradient-to-br from-[#111827] to-[#7C3AED] flex items-center justify-center shadow-lg">
+          <Lock className="w-7 h-7 text-white" />
         </div>
         <div className="text-center">
           <h2 className="text-lg font-black text-[#111827]">Protected Space</h2>
@@ -462,7 +867,7 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
             onKeyDown={e => { if (e.key === 'Enter') handleUnlock(); }}
             placeholder="Password"
             autoFocus
-            className="w-full bg-[#F9FAFB] border border-gray-200 rounded-2xl px-4 py-3.5 text-sm outline-none focus:border-[#111827] focus:ring-2 focus:ring-[#111827]/10 pr-12"
+            className="w-full bg-[#F9FAFB] border border-gray-200 rounded-2xl px-4 py-3.5 text-sm outline-none focus:border-[#7C3AED] focus:ring-2 focus:ring-[#7C3AED]/10 pr-12"
           />
           <button onClick={() => setShowUnlockPw(p => !p)} aria-label="Toggle password"
             className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-400">
@@ -478,15 +883,43 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
     );
   }
 
-  if (!note) return null;
+  if (noteNotFound) {
+    return (
+      <div className="min-h-screen bg-white flex flex-col items-center justify-center px-8 gap-6">
+        <div className="w-16 h-16 rounded-3xl bg-gray-100 flex items-center justify-center">
+          <svg className="w-8 h-8 text-gray-300" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/>
+          </svg>
+        </div>
+        <div className="text-center">
+          <h2 className="text-lg font-black text-[#111827]">Space not found</h2>
+          <p className="text-sm text-gray-400 mt-1 max-w-[240px] leading-relaxed">This link may have expired or the space was deleted.</p>
+        </div>
+        <button onClick={onBack}
+          className="px-6 py-3 bg-gradient-to-br from-[#111827] to-[#7C3AED] text-white text-sm font-bold rounded-2xl">
+          Go back
+        </button>
+      </div>
+    );
+  }
 
-  // ── Main editor ───────────────────────────────────────────────────────────────
+  if (!note) {
+    return (
+      <div className="min-h-screen bg-white flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="w-6 h-6 animate-spin text-[#7C3AED]" />
+          <p className="text-sm text-gray-400">Loading space…</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Main editor ───────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-white flex flex-col">
 
       {/* ── HEADER ── */}
       <header className="sticky top-0 z-20 bg-white/95 backdrop-blur-sm px-4 py-3 flex items-center gap-2.5">
-        {/* Back / save */}
         <button onClick={handleSave} aria-label="Save and go back"
           className="w-9 h-9 rounded-full bg-white border border-gray-200 shadow-sm flex items-center justify-center shrink-0">
           <ChevronLeft className="w-5 h-5 text-[#374151]" />
@@ -494,7 +927,6 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
 
         <div className="flex-1" />
 
-        {/* Lock icon */}
         {notePassword && (
           <div className="w-7 h-7 rounded-full bg-violet-50 border border-violet-100 flex items-center justify-center">
             <Lock className="w-3 h-3 text-[#7C3AED]" />
@@ -525,52 +957,48 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
           )}
         </AnimatePresence>
 
-        {/* ⋯ context trigger */}
         <button onClick={() => setShowContext(true)} aria-label="More options"
           className="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center">
           <MoreHorizontal className="w-4 h-4 text-[#374151]" />
         </button>
-
       </header>
 
       {/* ── SCROLLABLE CONTENT ── */}
       <main className="flex-1 px-5 pb-56 overflow-y-auto">
-        {/* Date metadata */}
         <div className="flex items-center gap-2 mt-2 mb-3">
-          <span className="text-[10px] text-gray-400">{fmtDate(note.updatedAt)}</span>
+          <span className="text-[10px] text-gray-400">{fmtDate((note as any).updatedAt || new Date().toISOString())}</span>
         </div>
 
-        {/* Large editable title */}
+        {/* Title */}
         <div
           ref={titleRef}
           contentEditable
           suppressContentEditableWarning
-          role="textbox"
-          aria-multiline="false"
-          aria-label="Space title"
+          role="textbox" aria-multiline="false" aria-label="Space title"
           data-placeholder="Title"
           className="clipo-title text-[1.75rem] font-black text-[#111827] leading-tight mb-4 min-h-[2.2rem] break-words"
           onInput={() => scheduleAutoSave()}
         />
 
-        {/* Rich text body */}
+        {/* Body */}
         <div
           ref={bodyRef}
           contentEditable
           suppressContentEditableWarning
-          role="textbox"
-          aria-multiline="true"
-          aria-label="Space content"
+          role="textbox" aria-multiline="true" aria-label="Space content"
           data-placeholder="Start writing…"
           className="clipo-richtext text-[15px] text-[#374151] leading-relaxed min-h-[80px] break-words"
           onInput={() => scheduleAutoSave()}
+          onKeyDown={() => {
+            if (activeTab) setActiveTab(null);
+          }}
         />
 
         {/* Attachments */}
         {attachments.length > 0 && (
           <div className="flex flex-col gap-3 mt-5">
             {attachments.map((att, idx) => (
-              <div key={att.id} className="relative group">
+              <div key={att.id} className="relative">
                 {/* Reorder + delete controls */}
                 <div className="absolute -top-2 right-0 z-10 flex items-center gap-1">
                   {idx > 0 && (
@@ -591,29 +1019,41 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
                   </button>
                 </div>
 
-                {/* Voice — dark pill */}
+                {/* Voice */}
                 {att.type === 'voice' && (
-                  <button onClick={() => toggleAudio(att)}
-                    aria-label={playingId === att.id ? 'Pause voice note' : 'Play voice note'}
-                    className="w-full bg-[#111827] rounded-2xl px-4 py-3.5 flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-white/90 flex items-center justify-center shrink-0">
-                      {playingId === att.id
-                        ? <Pause className="w-3.5 h-3.5 fill-[#111827] text-[#111827]" />
-                        : <Play  className="w-3.5 h-3.5 fill-[#111827] text-[#111827] translate-x-0.5" />}
-                    </div>
-                    <WaveformBars waveform={att.waveform ?? Array(30).fill(40)} playing={playingId === att.id} />
-                    <span className="text-white/80 text-xs font-medium shrink-0">{fmtDuration(att.duration ?? 0)}</span>
-                  </button>
+                  <div className="relative">
+                    <button onClick={() => att.content && toggleAudio(att)}
+                      aria-label={playingId === att.id ? 'Pause' : 'Play'}
+                      className="w-full bg-gradient-to-br from-[#111827] to-[#7C3AED] rounded-2xl px-4 py-3.5 flex items-center gap-3"
+                      disabled={!att.content}>
+                      <div className="w-8 h-8 rounded-full bg-white/90 flex items-center justify-center shrink-0">
+                        {!att.content
+                          ? <Loader2 className="w-3.5 h-3.5 text-[#111827] animate-spin" />
+                          : playingId === att.id
+                            ? <Pause className="w-3.5 h-3.5 fill-[#111827] text-[#111827]" />
+                            : <Play  className="w-3.5 h-3.5 fill-[#111827] text-[#111827] translate-x-0.5" />
+                        }
+                      </div>
+                      <WaveformBars waveform={att.waveform ?? Array(30).fill(40)} playing={playingId === att.id} />
+                      <span className="text-white/80 text-xs font-medium shrink-0">{fmtDuration(att.duration ?? 0)}</span>
+                    </button>
+                  </div>
                 )}
 
                 {/* Image */}
                 {att.type === 'image' && (
-                  <div className="rounded-2xl overflow-hidden border border-gray-100 shadow-sm">
-                    <img src={att.content} alt={att.fileName || 'Image'} className="w-full object-cover max-h-72" />
-                    {att.fileName && (
+                  <div className="rounded-2xl overflow-hidden border border-gray-100 shadow-sm relative">
+                    {att.content
+                      ? <img src={att.content} alt={att.fileName || 'Image'} className="w-full object-cover max-h-72" />
+                      : <div className="w-full h-32 bg-gray-100 animate-pulse" />
+                    }
+                    {uploadProgress[att.id] !== undefined && (
+                      <UploadProgress pct={uploadProgress[att.id]} />
+                    )}
+                    {att.fileName && att.content && (
                       <div className="px-3 py-2 bg-gray-50 flex items-center justify-between">
                         <span className="text-xs text-gray-500 truncate">{att.fileName}</span>
-                        <a href={att.content} download={att.fileName} aria-label="Download image"
+                        <a href={att.content} download={att.fileName} aria-label="Download"
                           className="w-6 h-6 flex items-center justify-center text-gray-400">
                           <Download className="w-3.5 h-3.5" />
                         </a>
@@ -624,8 +1064,16 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
 
                 {/* Video */}
                 {att.type === 'video' && (
-                  <div className="rounded-2xl overflow-hidden border border-gray-100 shadow-sm">
-                    <video src={att.content} controls className="w-full max-h-64 bg-black" />
+                  <div className="rounded-2xl overflow-hidden border border-gray-100 shadow-sm relative">
+                    {att.content
+                      ? <video src={att.content} controls className="w-full max-h-64 bg-black" />
+                      : <div className="w-full h-32 bg-gray-900 flex items-center justify-center">
+                          <Loader2 className="w-6 h-6 text-white animate-spin" />
+                        </div>
+                    }
+                    {uploadProgress[att.id] !== undefined && (
+                      <UploadProgress pct={uploadProgress[att.id]} />
+                    )}
                     {att.fileName && (
                       <div className="px-3 py-2 bg-gray-50">
                         <span className="text-xs text-gray-500">{att.fileName}</span>
@@ -638,29 +1086,43 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
                 {att.type === 'file' && (
                   <div className="bg-[#F9FAFB] rounded-2xl border border-gray-200 px-4 py-3 flex items-center gap-3">
                     <div className="w-10 h-10 rounded-xl bg-white border border-gray-200 flex items-center justify-center shrink-0">
-                      <FileText className="w-5 h-5 text-[#111827]" />
+                      {uploadProgress[att.id] !== undefined
+                        ? <Loader2 className="w-5 h-5 text-[#7C3AED] animate-spin" />
+                        : <FileText className="w-5 h-5 text-[#111827]" />
+                      }
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-[#111827] truncate">{att.fileName || 'File'}</p>
                       {att.fileSize && <p className="text-xs text-gray-400">{att.fileSize}</p>}
+                      {uploadProgress[att.id] !== undefined && (
+                        <div className="mt-1 h-1 bg-gray-200 rounded-full overflow-hidden">
+                          <div className="h-full bg-gradient-to-r from-[#111827] to-[#7C3AED] rounded-full transition-all"
+                            style={{ width: `${uploadProgress[att.id]}%` }} />
+                        </div>
+                      )}
                     </div>
-                    <Download className="w-4 h-4 text-gray-400 shrink-0" />
+                    {att.content && (
+                      <a href={att.content} download={att.fileName || 'file'} aria-label="Download"
+                        className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-[#111827] shrink-0">
+                        <Download className="w-4 h-4" />
+                      </a>
+                    )}
                   </div>
                 )}
 
                 {/* Link */}
                 {att.type === 'link' && (
                   <a href={att.content} target="_blank" rel="noopener noreferrer"
-                    className="block bg-white rounded-2xl border border-gray-200 overflow-hidden hover:border-[#111827]/40 transition-all shadow-sm">
+                    className="block bg-white rounded-2xl border border-gray-200 overflow-hidden hover:border-[#7C3AED]/40 transition-all shadow-sm">
                     {att.linkImage && <img src={att.linkImage} alt="" className="w-full h-32 object-cover" />}
                     <div className="p-3.5">
                       <p className="text-sm font-bold text-[#111827] line-clamp-1">{att.linkTitle || att.content}</p>
                       {att.linkDescription && (
                         <p className="text-xs text-gray-400 line-clamp-2 mt-0.5">{att.linkDescription}</p>
                       )}
-                      <p className="text-[10px] text-[#111827] mt-1.5 flex items-center gap-1">
+                      <p className="text-[10px] text-[#7C3AED] mt-1.5 flex items-center gap-1">
                         <ExternalLink className="w-3 h-3" />
-                        {att.content.slice(0, 42)}
+                        {att.content.replace(/^https?:\/\//, '').slice(0, 40)}
                       </p>
                     </div>
                   </a>
@@ -668,42 +1130,191 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
 
                 {/* Checklist */}
                 {att.type === 'checklist' && (
-                  <ChecklistBlock
-                    att={att}
-                    onToggle={toggleCheckItem}
-                    onAddItem={addCheckItem}
-                    onDeleteItem={deleteCheckItem}
-                  />
+                  <ChecklistBlock att={att}
+                    onToggle={toggleCheckItem} onAddItem={addCheckItem} onDeleteItem={deleteCheckItem} onRenameItem={renameCheckItem} />
                 )}
 
                 {/* Code */}
                 {att.type === 'code' && (
-                  <div className="bg-[#1E1E2E] rounded-2xl overflow-hidden shadow-sm">
-                    <div className="px-4 py-2 bg-white/5 flex items-center justify-between">
-                      <span className="text-xs font-mono text-white/40">{att.codeLanguage || 'code'}</span>
-                      <button
-                        onClick={() => { navigator.clipboard.writeText(att.content); showToast('Copied!', 'success'); }}
-                        aria-label="Copy code"
-                        className="text-xs text-white/40 hover:text-white/80 flex items-center gap-1"
-                      >
-                        <Copy className="w-3 h-3" /> Copy
-                      </button>
-                    </div>
-                    <textarea
-                      value={att.content}
-                      onChange={e => {
-                        const updated = attachments.map(a => a.id === att.id ? { ...a, content: e.target.value } : a);
-                        setAttachments(updated);
-                        scheduleAutoSave(updated);
-                      }}
-                      spellCheck={false}
-                      aria-label="Code editor"
-                      className="w-full bg-transparent text-xs font-mono text-[#A9B1D6] p-4 resize-none outline-none min-h-[100px] leading-relaxed"
-                      style={{ caretColor: '#A9B1D6' }}
-                    />
+                  <CodeBlock att={att} onChange={content => {
+                    const updated = attachments.map(a => a.id === att.id ? { ...a, content } : a);
+                    setAttachments(updated);
+                    scheduleAutoSave(updated);
+                  }} onLanguageChange={lang => {
+                    const updated = attachments.map(a => a.id === att.id ? { ...a, codeLanguage: lang } : a);
+                    setAttachments(updated);
+                    scheduleAutoSave(updated);
+                  }} />
+                )}
+
+                {/* Text block */}
+                {att.type === 'text' && (
+                  <textarea
+                    className="w-full text-sm text-[#111827] bg-transparent outline-none resize-none placeholder:text-gray-300 leading-relaxed"
+                    value={att.content}
+                    placeholder="Write something..."
+                    rows={1}
+                    onChange={e => {
+                      e.target.style.height = 'auto';
+                      e.target.style.height = e.target.scrollHeight + 'px';
+                      const updated = attachments.map(a => a.id === att.id ? { ...a, content: e.target.value } : a);
+                      setAttachments(updated);
+                      scheduleAutoSave(updated);
+                    }}
+                    onInput={e => {
+                      const el = e.currentTarget;
+                      el.style.height = 'auto';
+                      el.style.height = el.scrollHeight + 'px';
+                    }}
+                  />
+                )}
+
+                {/* Divider */}
+                {att.type === 'divider' && (
+                  <div className="py-2 px-1">
+                    <div className="h-px bg-gradient-to-r from-transparent via-[#D1D5DB] to-transparent" />
                   </div>
                 )}
 
+                {/* Bullet list */}
+                {att.type === 'bullet' && (
+                  <div className="py-1 flex flex-col gap-0.5">
+                    {(att.listItems ?? ['']).map((item, idx) => (
+                      <div key={idx} className="flex items-center gap-2 group/li">
+                        <Circle className="w-2 h-2 text-[#7C3AED] shrink-0 fill-[#7C3AED]" />
+                        <input
+                          className="flex-1 text-sm text-[#111827] bg-transparent outline-none placeholder:text-gray-300"
+                          value={item}
+                          placeholder="List item"
+                          onChange={e => updateListItem(att.id, idx, e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') { e.preventDefault(); addListItem(att.id); }
+                            if (e.key === 'Backspace' && item === '' && (att.listItems?.length ?? 0) > 1) {
+                              e.preventDefault(); removeListItem(att.id, idx);
+                            }
+                          }}
+                        />
+                        <button onClick={() => removeListItem(att.id, idx)}
+                          className="opacity-0 group-hover/li:opacity-100 transition-opacity text-gray-300 hover:text-red-400 shrink-0">
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                    <button onClick={() => addListItem(att.id)}
+                      className="flex items-center gap-2 text-[11px] text-[#9CA3AF] hover:text-[#7C3AED] transition-colors mt-1 w-fit">
+                      <Plus className="w-3 h-3" /> Add item
+                    </button>
+                  </div>
+                )}
+
+                {/* Numbered list */}
+                {att.type === 'numbered' && (
+                  <div className="py-1 flex flex-col gap-0.5">
+                    {(att.listItems ?? ['']).map((item, idx) => (
+                      <div key={idx} className="flex items-center gap-2 group/li">
+                        <span className="text-xs font-bold text-[#7C3AED] shrink-0 w-4 text-right">{idx + 1}.</span>
+                        <input
+                          className="flex-1 text-sm text-[#111827] bg-transparent outline-none placeholder:text-gray-300"
+                          value={item}
+                          placeholder="List item"
+                          onChange={e => updateListItem(att.id, idx, e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') { e.preventDefault(); addListItem(att.id); }
+                            if (e.key === 'Backspace' && item === '' && (att.listItems?.length ?? 0) > 1) {
+                              e.preventDefault(); removeListItem(att.id, idx);
+                            }
+                          }}
+                        />
+                        <button onClick={() => removeListItem(att.id, idx)}
+                          className="opacity-0 group-hover/li:opacity-100 transition-opacity text-gray-300 hover:text-red-400 shrink-0">
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                    <button onClick={() => addListItem(att.id)}
+                      className="flex items-center gap-2 text-[11px] text-[#9CA3AF] hover:text-[#7C3AED] transition-colors mt-1 w-fit">
+                      <Plus className="w-3 h-3" /> Add item
+                    </button>
+                  </div>
+                )}
+
+                {/* Table */}
+                {att.type === 'table' && att.tableData && (
+                  <div className="py-1">
+                    <div className="overflow-x-auto -mx-1">
+                      <table className="w-full border-collapse text-sm" style={{ minWidth: att.tableData.cols * 96 }}>
+                        <tbody>
+                          {att.tableData.cells.map((row, ri) => (
+                            <tr key={ri} className="group/row">
+                              {row.map((cell, ci) => (
+                                <td key={ci}
+                                  className={`border border-gray-200 p-0 relative ${ri === 0 && att.tableData!.hasHeader ? 'bg-[#F3F0FF]' : 'bg-white'}`}>
+                                  <input
+                                    className={`w-full px-2 py-1.5 text-xs bg-transparent outline-none min-w-[80px]
+                                      ${ri === 0 && att.tableData!.hasHeader ? 'font-semibold text-[#374151]' : 'text-[#374151]'}`}
+                                    value={cell}
+                                    placeholder={ri === 0 && att.tableData!.hasHeader ? `Col ${ci + 1}` : ''}
+                                    onChange={e => updateTableCell(att.id, ri, ci, e.target.value)}
+                                    onKeyDown={e => {
+                                      if (e.key === 'Tab') {
+                                        e.preventDefault();
+                                        const totalCells = att.tableData!.rows * att.tableData!.cols;
+                                        const currentIdx = ri * att.tableData!.cols + ci;
+                                        const nextIdx = (currentIdx + 1) % totalCells;
+                                        const nextRow = Math.floor(nextIdx / att.tableData!.cols);
+                                        const nextCol = nextIdx % att.tableData!.cols;
+                                        const inputs = e.currentTarget.closest('table')?.querySelectorAll('input');
+                                        (inputs?.[nextRow * att.tableData!.cols + nextCol] as HTMLInputElement)?.focus();
+                                      }
+                                    }}
+                                  />
+                                </td>
+                              ))}
+                              {/* Delete row button */}
+                              <td className="border-0 p-0 w-5">
+                                {att.tableData.rows > 1 && (
+                                  <button onClick={() => removeTableRow(att.id, ri)}
+                                    className="opacity-0 group-hover/row:opacity-100 transition-opacity w-5 h-full flex items-center justify-center text-gray-300 hover:text-red-400">
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                          {/* Delete col row */}
+                          <tr>
+                            {att.tableData.cells[0].map((_, ci) => (
+                              <td key={ci} className="border-0 p-0 h-5">
+                                {att.tableData!.cols > 1 && (
+                                  <button onClick={() => removeTableCol(att.id, ci)}
+                                    className="w-full flex items-center justify-center text-gray-300 hover:text-red-400 opacity-0 hover:opacity-100 transition-opacity h-5">
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                )}
+                              </td>
+                            ))}
+                            <td />
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    {/* Table actions */}
+                    <div className="flex items-center gap-3 mt-2">
+                      <button onClick={() => addTableRow(att.id)}
+                        className="flex items-center gap-1 text-[11px] text-[#9CA3AF] hover:text-[#7C3AED] transition-colors">
+                        <Plus className="w-3 h-3" /> Row
+                      </button>
+                      <button onClick={() => addTableCol(att.id)}
+                        className="flex items-center gap-1 text-[11px] text-[#9CA3AF] hover:text-[#7C3AED] transition-colors">
+                        <Plus className="w-3 h-3" /> Column
+                      </button>
+                      <button onClick={() => toggleTableHeader(att.id)}
+                        className={`flex items-center gap-1 text-[11px] transition-colors ${att.tableData.hasHeader ? 'text-[#7C3AED]' : 'text-[#9CA3AF] hover:text-[#7C3AED]'}`}>
+                        Header {att.tableData.hasHeader ? 'on' : 'off'}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -713,26 +1324,24 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
       {/* ── BOTTOM TOOLBAR ── */}
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 z-20">
 
-        {/* Sub-options panel — slides up when a tab is active */}
         <AnimatePresence>
           {activeTab && (
-            <motion.div
-              key={activeTab}
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
+            <motion.div key={activeTab}
+              initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }}
               exit={{ height: 0, opacity: 0 }}
               transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
               className="overflow-hidden border-t border-gray-100 bg-[#FAFAFA]"
             >
-              {/* ── MEDIA sub-options ── */}
+              {/* ── MEDIA ── */}
               {activeTab === 'media' && (
                 <div className="flex items-center gap-2 px-4 py-3">
                   {[
-                    { icon: <ImageIcon className="w-5 h-5" />,  label: 'Image',  bg: 'bg-blue-50 text-blue-600',    action: () => triggerFile('image') },
-                    { icon: <VideoIcon className="w-5 h-5" />,  label: 'Video',  bg: 'bg-purple-50 text-purple-600',action: () => triggerFile('video') },
-                    { icon: <FileText className="w-5 h-5" />,   label: 'File',   bg: 'bg-amber-50 text-amber-600',  action: () => triggerFile('file') },
-                    { icon: <Mic className="w-5 h-5" />,        label: 'Voice',  bg: 'bg-rose-50 text-rose-600',    action: () => { setShowVoice(true); setActiveTab(null); } },
-                    { icon: <LinkIcon className="w-5 h-5" />,   label: 'Link',   bg: 'bg-cyan-50 text-cyan-600',    action: () => { setLinkInput(''); setShowLinkSheet(true); setActiveTab(null); } },
+                    { icon: <Type className="w-5 h-5" />,      label: 'Text',  bg: 'bg-green-50 text-green-600',  action: () => { addAttachment({ id: uid(), type: 'text', content: '' }); setActiveTab(null); } },
+                    { icon: <ImageIcon className="w-5 h-5" />, label: 'Image', bg: 'bg-blue-50 text-blue-600',    action: () => triggerFile('image') },
+                    { icon: <VideoIcon className="w-5 h-5" />, label: 'Video', bg: 'bg-purple-50 text-purple-600', action: () => triggerFile('video') },
+                    { icon: <FileText className="w-5 h-5" />,  label: 'File',  bg: 'bg-amber-50 text-amber-600',  action: () => triggerFile('file') },
+                    { icon: <Mic className="w-5 h-5" />,       label: 'Voice', bg: 'bg-rose-50 text-rose-600',    action: () => { setShowVoice(true); setActiveTab(null); } },
+                    { icon: <LinkIcon className="w-5 h-5" />,  label: 'Link',  bg: 'bg-cyan-50 text-cyan-600',    action: () => { setLinkInput(''); setShowLinkSheet(true); setActiveTab(null); } },
                   ].map(opt => (
                     <button key={opt.label} onClick={opt.action} aria-label={`Add ${opt.label}`}
                       className="flex-1 flex flex-col items-center gap-1.5 py-1.5">
@@ -745,26 +1354,30 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
                 </div>
               )}
 
-              {/* ── LIST sub-options ── */}
+              {/* ── LIST ── */}
               {activeTab === 'list' && (
                 <div className="flex items-center gap-2 px-4 py-3">
                   {[
-                    { icon: <ListChecks className="w-5 h-5" />, label: 'Checklist', bg: 'bg-indigo-50 text-indigo-600',
-                      action: () => { addAttachment({ id: uid(), type: 'checklist', content: '', checklistItems: [] }); }},
-                    { icon: <Hash className="w-5 h-5" />, label: 'Section', bg: 'bg-emerald-50 text-emerald-600',
+                    { icon: <ListChecks className="w-5 h-5" />,   label: 'Checklist', bg: 'bg-indigo-50 text-indigo-600',
+                      action: () => addAttachment({ id: uid(), type: 'checklist', content: '', checklistItems: [] }) },
+                    { icon: <Hash className="w-5 h-5" />,          label: 'Subhead',   bg: 'bg-emerald-50 text-emerald-600',
                       action: () => {
-                        // Add section header to last checklist, or create new checklist with section
-                        const lastChecklist = [...attachments].reverse().find(a => a.type === 'checklist');
-                        if (lastChecklist) {
-                          addCheckItem(lastChecklist.id, 'Section', true);
-                          setActiveTab(null);
-                        } else {
-                          addAttachment({ id: uid(), type: 'checklist', content: '', checklistItems: [{ id: uid(), text: 'Section', completed: false, isSection: true }] });
-                        }
+                        const last = [...attachments].reverse().find(a => a.type === 'checklist');
+                        if (last) { addCheckItem(last.id, 'Section', true); setActiveTab(null); }
+                        else addAttachment({ id: uid(), type: 'checklist', content: '', checklistItems: [{ id: uid(), text: 'Section', completed: false, isSection: true }] });
                       }},
+                    { icon: <List className="w-5 h-5" />,          label: 'Bullet',    bg: 'bg-violet-50 text-violet-600',
+                      action: () => addAttachment({ id: uid(), type: 'bullet', content: '', listItems: [''] }) },
+                    { icon: <ListNumbered className="w-5 h-5" />,  label: 'Numbered',  bg: 'bg-blue-50 text-blue-600',
+                      action: () => addAttachment({ id: uid(), type: 'numbered', content: '', listItems: [''] }) },
+                    { icon: <Table2 className="w-5 h-5" />,        label: 'Table',     bg: 'bg-orange-50 text-orange-600',
+                      action: () => addAttachment({ id: uid(), type: 'table', content: '',
+                        tableData: { rows: 2, cols: 3, cells: [['','',''],['','','']], hasHeader: true } }) },
+                    { icon: <Minus className="w-5 h-5" />,         label: 'Divider',   bg: 'bg-gray-100 text-gray-500',
+                      action: () => addAttachment({ id: uid(), type: 'divider', content: '' }) },
                   ].map(opt => (
                     <button key={opt.label} onClick={opt.action} aria-label={opt.label}
-                      className="flex-1 flex flex-col items-center gap-1.5 py-1.5 max-w-[100px]">
+                      className="flex-1 flex flex-col items-center gap-1.5 py-1.5">
                       <div className={`w-10 h-10 rounded-2xl flex items-center justify-center ${opt.bg}`}>
                         {opt.icon}
                       </div>
@@ -774,131 +1387,139 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
                 </div>
               )}
 
-              {/* ── FORMAT sub-options ── */}
+              {/* ── FORMAT ── */}
               {activeTab === 'format' && (
-                <div className="px-4 pt-3 pb-2 flex flex-col gap-3">
-                  {/* Highlight colors */}
-                  <div className="flex items-center gap-2.5">
-                    <Highlighter className="w-4 h-4 text-gray-400 shrink-0" />
-                    {[
-                      { bg: '#FEF08A', label: 'Yellow' }, { bg: '#EDE9FE', label: 'Purple' },
-                      { bg: '#DCFCE7', label: 'Green' },  { bg: '#FED7AA', label: 'Orange' },
-                      { bg: '#FCE7F3', label: 'Pink' },
-                    ].map(h => (
-                      <button key={h.label} onMouseDown={e => { e.preventDefault(); bodyRef.current?.focus(); document.execCommand('backColor', false, h.bg); }}
-                        aria-label={`Highlight ${h.label}`}
-                        className="w-7 h-7 rounded-full border-[1.5px] border-white shadow-sm flex-shrink-0"
-                        style={{ backgroundColor: h.bg }} />
-                    ))}
-                    <button onMouseDown={e => { e.preventDefault(); bodyRef.current?.focus(); document.execCommand('backColor', false, 'transparent'); }}
-                      aria-label="Clear highlight"
-                      className="w-7 h-7 rounded-full border border-gray-200 flex items-center justify-center bg-white shrink-0">
-                      <X className="w-3 h-3 text-gray-400" />
-                    </button>
+                <div className="px-4 pt-3 pb-3 flex flex-col gap-3">
+
+                  {/* Row 1 — Highlight */}
+                  <div className="flex items-center gap-0">
+                    <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider w-14 shrink-0">Highlight</span>
+                    <div className="flex items-center gap-2">
+                      {[
+                        { bg: '#FEF08A', label: 'Yellow' },
+                        { bg: '#EDE9FE', label: 'Purple' },
+                        { bg: '#DCFCE7', label: 'Green' },
+                        { bg: '#FED7AA', label: 'Orange' },
+                        { bg: '#FCE7F3', label: 'Pink' },
+                      ].map(h => (
+                        <button key={h.label}
+                          onMouseDown={e => { e.preventDefault(); bodyRef.current?.focus(); document.execCommand('backColor', false, h.bg); }}
+                          aria-label={`Highlight ${h.label}`}
+                          className="w-7 h-7 rounded-full border-2 border-white shadow-sm shrink-0"
+                          style={{ backgroundColor: h.bg }} />
+                      ))}
+                      <button
+                        onMouseDown={e => { e.preventDefault(); bodyRef.current?.focus(); document.execCommand('backColor', false, 'transparent'); }}
+                        aria-label="Clear highlight"
+                        className="w-7 h-7 rounded-full border border-gray-200 bg-white flex items-center justify-center shrink-0">
+                        <X className="w-3 h-3 text-gray-400" />
+                      </button>
+                    </div>
                   </div>
 
-                  {/* Style + Headings in one row */}
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    {[
-                      { icon: <Bold className="w-4 h-4" />,           cmd: 'bold',               label: 'Bold' },
-                      { icon: <Italic className="w-4 h-4" />,         cmd: 'italic',             label: 'Italic' },
-                      { icon: <Underline className="w-4 h-4" />,      cmd: 'underline',          label: 'Underline' },
-                      { icon: <Strikethrough className="w-4 h-4" />,  cmd: 'strikeThrough',      label: 'Strikethrough' },
-                      { icon: <ListOrdered className="w-4 h-4" />,    cmd: 'insertOrderedList',  label: 'Numbered' },
-                      { icon: <List className="w-4 h-4" />,           cmd: 'insertUnorderedList',label: 'Bullet' },
-                    ].map(f => (
-                      <button key={f.cmd} onMouseDown={e => { e.preventDefault(); execFormat(f.cmd); }} aria-label={f.label}
-                        className="w-9 h-9 flex items-center justify-center bg-white border border-gray-200 rounded-xl text-[#374151] hover:bg-gray-50 active:bg-[#111827] active:text-white transition-colors">
-                        {f.icon}
-                      </button>
-                    ))}
+                  <div className="h-px bg-gray-100" />
 
-                    <div className="w-px h-6 bg-gray-200 mx-0.5 shrink-0" />
-
-                    {[
-                      { icon: <Heading1 className="w-4 h-4" />, cmd: 'formatBlock', val: 'h1', label: 'H1' },
-                      { icon: <Heading2 className="w-4 h-4" />, cmd: 'formatBlock', val: 'h2', label: 'H2' },
-                      { icon: <Heading3 className="w-4 h-4" />, cmd: 'formatBlock', val: 'h3', label: 'H3' },
-                      { icon: <Indent className="w-4 h-4" />,   cmd: 'indent',                  label: 'Indent' },
-                      { icon: <Outdent className="w-4 h-4" />,  cmd: 'outdent',                 label: 'Outdent' },
-                    ].map(f => (
-                      <button key={f.label} onMouseDown={e => { e.preventDefault(); execFormat(f.cmd, f.val); }} aria-label={f.label}
-                        className="w-9 h-9 flex items-center justify-center bg-white border border-gray-200 rounded-xl text-[#374151] hover:bg-gray-50 active:bg-[#111827] active:text-white transition-colors">
-                        {f.icon}
-                      </button>
-                    ))}
+                  {/* Row 2 — Text style + Headings + Indent */}
+                  <div className="flex items-center gap-0">
+                    <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider w-14 shrink-0">Style</span>
+                    <div className="flex items-center gap-1.5">
+                      {[
+                        { icon: <Bold className="w-4 h-4" />,          cmd: 'bold',              val: undefined, label: 'Bold' },
+                        { icon: <Italic className="w-4 h-4" />,        cmd: 'italic',            val: undefined, label: 'Italic' },
+                        { icon: <Underline className="w-4 h-4" />,     cmd: 'underline',         val: undefined, label: 'Underline' },
+                        { icon: <Strikethrough className="w-4 h-4" />, cmd: 'strikeThrough',     val: undefined, label: 'Strike' },
+                      ].map(f => (
+                        <button key={f.cmd}
+                          onMouseDown={e => { e.preventDefault(); execFormat(f.cmd, f.val); }}
+                          aria-label={f.label}
+                          className="w-9 h-9 flex items-center justify-center bg-white border border-gray-200 rounded-xl text-[#374151] active:bg-[#111827] active:text-white transition-colors shrink-0">
+                          {f.icon}
+                        </button>
+                      ))}
+                      <div className="w-px h-5 bg-gray-200 mx-0.5 shrink-0" />
+                      {[
+                        { icon: <Heading1 className="w-4 h-4" />, cmd: 'formatBlock', val: 'h1', label: 'H1' },
+                        { icon: <Heading2 className="w-4 h-4" />, cmd: 'formatBlock', val: 'h2', label: 'H2' },
+                        { icon: <Heading3 className="w-4 h-4" />, cmd: 'formatBlock', val: 'h3', label: 'H3' },
+                      ].map(f => (
+                        <button key={f.label}
+                          onMouseDown={e => { e.preventDefault(); execFormat(f.cmd, f.val); }}
+                          aria-label={f.label}
+                          className="w-9 h-9 flex items-center justify-center bg-white border border-gray-200 rounded-xl text-[#374151] active:bg-[#111827] active:text-white transition-colors shrink-0">
+                          {f.icon}
+                        </button>
+                      ))}
+                      <div className="w-px h-5 bg-gray-200 mx-0.5 shrink-0" />
+                      {[
+                        { icon: <Indent className="w-4 h-4" />,  cmd: 'indent',  val: undefined, label: 'Indent' },
+                        { icon: <Outdent className="w-4 h-4" />, cmd: 'outdent', val: undefined, label: 'Outdent' },
+                      ].map(f => (
+                        <button key={f.label}
+                          onMouseDown={e => { e.preventDefault(); execFormat(f.cmd, f.val); }}
+                          aria-label={f.label}
+                          className="w-9 h-9 flex items-center justify-center bg-white border border-gray-200 rounded-xl text-[#374151] active:bg-[#111827] active:text-white transition-colors shrink-0">
+                          {f.icon}
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
-                  {/* Alignment */}
-                  <div className="flex items-center gap-1.5 pb-1">
-                    {[
-                      { icon: <AlignLeft className="w-4 h-4" />,    cmd: 'justifyLeft',   label: 'Left' },
-                      { icon: <AlignCenter className="w-4 h-4" />,  cmd: 'justifyCenter', label: 'Center' },
-                      { icon: <AlignRight className="w-4 h-4" />,   cmd: 'justifyRight',  label: 'Right' },
-                      { icon: <AlignJustify className="w-4 h-4" />, cmd: 'justifyFull',   label: 'Justify' },
-                    ].map(f => (
-                      <button key={f.cmd} onMouseDown={e => { e.preventDefault(); execFormat(f.cmd); }} aria-label={f.label}
-                        className="w-9 h-9 flex items-center justify-center bg-white border border-gray-200 rounded-xl text-[#374151] hover:bg-gray-50 active:bg-[#111827] active:text-white transition-colors">
-                        {f.icon}
-                      </button>
-                    ))}
+                  <div className="h-px bg-gray-100" />
+
+                  {/* Row 3 — Align */}
+                  <div className="flex items-center gap-0">
+                    <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider w-14 shrink-0">Align</span>
+                    <div className="flex items-center gap-1.5">
+                      {[
+                        { icon: <AlignLeft className="w-4 h-4" />,    cmd: 'justifyLeft',   label: 'Left' },
+                        { icon: <AlignCenter className="w-4 h-4" />,  cmd: 'justifyCenter', label: 'Center' },
+                        { icon: <AlignRight className="w-4 h-4" />,   cmd: 'justifyRight',  label: 'Right' },
+                        { icon: <AlignJustify className="w-4 h-4" />, cmd: 'justifyFull',   label: 'Justify' },
+                      ].map(f => (
+                        <button key={f.cmd}
+                          onMouseDown={e => { e.preventDefault(); execFormat(f.cmd); }}
+                          aria-label={f.label}
+                          className="w-9 h-9 flex items-center justify-center bg-white border border-gray-200 rounded-xl text-[#374151] active:bg-[#111827] active:text-white transition-colors shrink-0">
+                          {f.icon}
+                        </button>
+                      ))}
+                    </div>
                   </div>
+
                 </div>
               )}
 
-              {/* ── CODE sub-options ── */}
-              {activeTab === 'code' && (
-                <div className="px-4 py-3">
-                  <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Language</p>
-                  <div className="flex flex-wrap gap-2 mb-3">
-                    {['javascript','typescript','python','css','html','json','bash','other'].map(lang => (
-                      <button key={lang} onClick={() => setCodeLang(lang)}
-                        className={`px-3 py-1.5 rounded-xl text-[11px] font-semibold border transition-all ${
-                          codeLang === lang
-                            ? 'bg-gradient-to-br from-[#111827] to-[#7C3AED] text-white border-transparent'
-                            : 'bg-white text-[#374151] border-gray-200 hover:border-gray-400'
-                        }`}>
-                        {lang}
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    onClick={() => addAttachment({ id: uid(), type: 'code', content: '// Your code here\n', codeLanguage: codeLang })}
-                    className="w-full py-2.5 bg-gradient-to-br from-[#111827] to-[#7C3AED] text-white text-sm font-bold rounded-xl mb-1">
-                    Insert {codeLang} block
-                  </button>
-                </div>
-              )}
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* Main toolbar tabs */}
+        {/* Tab bar */}
         <div className="flex items-stretch border-t border-gray-100">
-          {[
-            { id: 'media'  as ToolTab, icon: <Plus className="w-5 h-5" />,        label: 'Media' },
-            { id: 'list'   as ToolTab, icon: <ListChecks className="w-5 h-5" />,  label: 'List' },
-            { id: null,                icon: <PenLine className="w-5 h-5" />,      label: 'Draw', draw: true },
-            { id: 'format' as ToolTab, icon: <Type className="w-5 h-5" />,         label: 'Format' },
-            { id: 'code'   as ToolTab, icon: <Code className="w-5 h-5" />,         label: 'Code' },
-          ].map(item => {
-            const isActive = !item.draw && activeTab === item.id;
+          {([
+            { id: 'media'  as ToolTab, icon: <Plus className="w-5 h-5" />,       label: 'Media' },
+            { id: 'list'   as ToolTab, icon: <ListChecks className="w-5 h-5" />, label: 'Blocks' },
+            { id: null,                icon: <PenLine className="w-5 h-5" />,     label: 'Draw', draw: true },
+            { id: 'format' as ToolTab, icon: <Type className="w-5 h-5" />,        label: 'Format' },
+            { id: null, icon: <Code className="w-5 h-5" />, label: 'Code', code: true },
+          ] as const).map(item => {
+            const isActive = !('draw' in item) && !('code' in item) && activeTab === item.id;
             return (
               <button
                 key={item.label}
                 onClick={() => {
-                  if (item.draw) { setShowDrawing(true); setActiveTab(null); return; }
+                  if ('draw' in item) { setShowDrawing(true); setActiveTab(null); return; }
+                  if ('code' in item) { addAttachment({ id: uid(), type: 'code', content: '', codeLanguage: 'javascript' }); setActiveTab(null); return; }
                   setActiveTab(prev => prev === item.id ? null : (item.id as ToolTab));
                 }}
                 aria-label={item.label}
                 aria-pressed={isActive}
                 className={`flex-1 flex flex-col items-center justify-center py-3 gap-0.5 transition-colors ${
-                  isActive ? 'text-[#111827] bg-gray-50' : 'text-[#6B7280] hover:text-[#374151]'
+                  isActive ? 'text-[#111827] bg-gray-50' : 'text-[#6B7280]'
                 }`}
               >
                 {item.icon}
                 <span className="text-[9px] font-semibold">{item.label}</span>
-                {isActive && <span className="w-1 h-1 rounded-full bg-[#111827] mt-0.5" />}
+                {isActive && <span className="w-4 h-0.5 rounded-full bg-gradient-to-r from-[#111827] to-[#7C3AED] mt-0.5" />}
               </button>
             );
           })}
@@ -907,31 +1528,27 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
 
       {/* Hidden file inputs */}
       <input ref={imageInputRef} type="file" accept={ALLOWED_TYPES.image.join(',')} className="hidden"
-        onChange={e => handleFileSelected('image', e.target.files?.[0])} aria-label="Image file input" />
+        onChange={e => handleFileSelected('image', e.target.files?.[0])} />
       <input ref={videoInputRef} type="file" accept={ALLOWED_TYPES.video.join(',')} className="hidden"
-        onChange={e => handleFileSelected('video', e.target.files?.[0])} aria-label="Video file input" />
-      <input ref={fileInputRef} type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.csv" className="hidden"
-        onChange={e => handleFileSelected('file', e.target.files?.[0])} aria-label="Document file input" />
+        onChange={e => handleFileSelected('video', e.target.files?.[0])} />
+      <input ref={fileInputRef}  type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.csv" className="hidden"
+        onChange={e => handleFileSelected('file', e.target.files?.[0])} />
 
-      {/* ═══════════════════ SHEETS ═══════════════════ */}
+      {/* ═══ SHEETS ═══ */}
 
       {/* Context menu */}
       <Sheet open={showContext} onClose={() => setShowContext(false)}>
         <div className="px-4 pt-4 pb-2">
-          <button onClick={shareLink}
-            className="w-full flex items-center gap-3.5 py-3.5 text-left">
+          <button onClick={shareLink} className="w-full flex items-center gap-3.5 py-3.5 text-left">
             <Share2 className="w-4 h-4 text-[#374151] shrink-0" />
             <span className="flex-1 text-sm font-medium text-[#111827]">Share Link</span>
           </button>
-
-          <button onClick={handleDelete}
-            className="w-full flex items-center gap-3.5 py-3.5 border-t border-gray-50">
+          <button onClick={handleDelete} className="w-full flex items-center gap-3.5 py-3.5 border-t border-gray-50">
             <Trash2 className="w-4 h-4 text-red-500" />
             <span className="text-sm font-semibold text-red-500 flex-1 text-left">Delete Space</span>
           </button>
-
           <p className="text-[10px] text-gray-300 text-center py-3 border-t border-gray-50 mt-1">
-            Last edited {fmtDate(note.updatedAt)}
+            Last edited {fmtDate((note as any).updatedAt || new Date().toISOString())}
           </p>
         </div>
       </Sheet>
@@ -939,7 +1556,7 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
       {/* Voice recorder */}
       <Sheet open={showVoice} onClose={() => setShowVoice(false)} title="Voice Note">
         <VoiceRecorder
-          onSave={(url, dur, wf) => addAttachment({ id: uid(), type: 'voice', content: url, duration: dur, waveform: wf })}
+          onSave={handleVoiceSave}
           onCancel={() => setShowVoice(false)}
         />
       </Sheet>
@@ -951,42 +1568,30 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
             type="url"
             value={linkInput}
             onChange={e => setLinkInput(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Enter' && linkInput.trim()) {
-                addAttachment({ id: uid(), type: 'link', content: linkInput.trim(), linkTitle: linkInput.trim() });
-                setShowLinkSheet(false);
-              }
-            }}
-            placeholder="https://..."
+            onKeyDown={e => { if (e.key === 'Enter') handleAddLink(); }}
+            placeholder="https://…"
             autoFocus
             className="w-full bg-[#F9FAFB] border border-gray-200 rounded-2xl px-4 py-3.5 text-sm outline-none focus:border-[#7C3AED] focus:ring-2 focus:ring-[#7C3AED]/10"
           />
           <button
-            onClick={() => {
-              if (!linkInput.trim()) return;
-              addAttachment({ id: uid(), type: 'link', content: linkInput.trim(), linkTitle: linkInput.trim() });
-              setShowLinkSheet(false);
-            }}
-            disabled={!linkInput.trim()}
-            className="w-full py-3.5 bg-gradient-to-br from-[#111827] to-[#7C3AED] text-white font-bold rounded-2xl text-sm disabled:opacity-40"
+            onClick={handleAddLink}
+            disabled={!linkInput.trim() || linkLoading}
+            className="w-full py-3.5 bg-gradient-to-br from-[#111827] to-[#7C3AED] text-white font-bold rounded-2xl text-sm disabled:opacity-40 flex items-center justify-center gap-2"
           >
-            Add Link
+            {linkLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+            {linkLoading ? 'Fetching preview…' : 'Add Link'}
           </button>
         </div>
       </Sheet>
 
-      {/* Exit warning modal */}
+      {/* Exit warning */}
       <AnimatePresence>
         {showExitWarn && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-5">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowExitWarn(false)} />
             <motion.div
-              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-              onClick={() => setShowExitWarn(false)}
-            />
-            <motion.div
-              initial={{ scale: 0.92, opacity: 0, y: 12 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
+              initial={{ scale: 0.92, opacity: 0, y: 12 }} animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.92, opacity: 0, y: 12 }}
               transition={{ type: 'spring', damping: 24, stiffness: 340 }}
               className="relative w-full max-w-xs bg-white rounded-3xl p-6 flex flex-col gap-4 z-10 shadow-2xl"
@@ -1002,32 +1607,41 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
               </div>
               <div className="flex gap-2">
                 <button onClick={() => setShowExitWarn(false)}
-                  className="flex-1 py-3 rounded-2xl border border-gray-200 text-sm font-semibold text-[#374151]">
-                  Wait
-                </button>
+                  className="flex-1 py-3 rounded-2xl border border-gray-200 text-sm font-semibold text-[#374151]">Wait</button>
                 <button onClick={() => { setShowExitWarn(false); doSaveAndBack(); }}
-                  className="flex-1 py-3 rounded-2xl bg-gradient-to-br from-[#111827] to-[#7C3AED] text-white text-sm font-bold">
-                  Leave
-                </button>
+                  className="flex-1 py-3 rounded-2xl bg-gradient-to-br from-[#111827] to-[#7C3AED] text-white text-sm font-bold">Leave</button>
               </div>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
 
-      {/* Drawing canvas — full-screen slide-up */}
+      {/* Drawing canvas */}
       <AnimatePresence>
         {showDrawing && (
-          <motion.div
-            initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
+          <motion.div initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
             transition={{ type: 'spring', damping: 28, stiffness: 300 }}
-            className="fixed inset-0 z-50"
-          >
+            className="fixed inset-0 z-50">
             <DrawingCanvas
               onClose={() => setShowDrawing(false)}
-              onSave={dataUrl => {
-                addAttachment({ id: uid(), type: 'image', content: dataUrl, fileName: 'Drawing' });
+              onSave={async (dataUrl) => {
                 setShowDrawing(false);
+                const attId = uid();
+                const placeholder: Attachment = { id: attId, type: 'image', content: '', fileName: 'Drawing' };
+                const withPlaceholder = [...attachments, placeholder];
+                setAttachments(withPlaceholder);
+                try {
+                  const blob = await fetch(dataUrl).then(r => r.blob());
+                  const { url, publicId } = await uploadFile(blob, 'drawing.png',
+                    (pct) => setUploadProgress(prev => ({ ...prev, [attId]: pct })));
+                  setUploadProgress(prev => { const n = { ...prev }; delete n[attId]; return n; });
+                  const finalAtts = withPlaceholder.map(a => a.id === attId ? { ...a, content: url, cloudinaryPublicId: publicId || undefined } : a);
+                  setAttachments(finalAtts);
+                  scheduleAutoSave(finalAtts);
+                } catch {
+                  showToast('Drawing upload failed.', 'error');
+                  setAttachments(withPlaceholder.filter(a => a.id !== attId));
+                }
               }}
             />
           </motion.div>

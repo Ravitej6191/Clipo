@@ -59,8 +59,9 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     playAudioRef.current?.pause();
     playAudioRef.current = null;
 
+    let stream: MediaStream | null = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
@@ -110,6 +111,8 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       visualizeWaveform();
 
     } catch {
+      stream?.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
       showToast('Could not access microphone. Please enable permissions.', 'error');
     }
   };

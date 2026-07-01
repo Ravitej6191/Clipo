@@ -6,7 +6,12 @@ export type AttachmentType =
   | 'voice'
   | 'checklist'
   | 'code'
-  | 'blockquote';
+  | 'blockquote'
+  | 'table'
+  | 'bullet'
+  | 'numbered'
+  | 'divider'
+  | 'text';
 
 export interface ChecklistItem {
   id: string;
@@ -15,10 +20,18 @@ export interface ChecklistItem {
   isSection?: boolean; // renders as numbered section header
 }
 
+export interface TableData {
+  rows: number;
+  cols: number;
+  cells: string[][];
+  hasHeader?: boolean;
+}
+
 export interface Attachment {
   id: string;
   type: AttachmentType;
   content: string;
+  cloudinaryPublicId?: string; // stored so we can delete from Cloudinary when removed
   checklistItems?: ChecklistItem[];
   fileName?: string;
   fileSize?: string;
@@ -30,6 +43,8 @@ export interface Attachment {
   waveform?: number[];
   codeLanguage?: string;
   blockquoteColor?: string; // 'purple' | 'orange' | 'gray'
+  tableData?: TableData;
+  listItems?: string[];    // for bullet / numbered blocks
 }
 
 export interface ClipoNote {
