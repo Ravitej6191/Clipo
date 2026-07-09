@@ -1,18 +1,38 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // ── User profiles ─────────────────────────────────────────────────────────
+    match /users/{userId} {
+      allow read:  if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // ── Notes ─────────────────────────────────────────────────────────────────
     match /notes/{noteId} {
-      // Anyone with the link can read (public collaboration)
-      allow read: if true;
+      // Backward compat: old notes used userId, new ones use ownerId
+      function noteOwner() {
+        return resource.data.get('ownerId', resource.data.get('userId', ''));
+      }
+      function isOwner() {
+        return request.auth != null && request.auth.uid == noteOwner();
+      }
+      function isCollaborator() {
+        return request.auth != null &&
+               request.auth.uid in resource.data.get('collaboratorUids', []);
+      }
+      function isEditor() {
+        return request.auth != null &&
+               request.auth.uid in resource.data.get('editorUids', []);
+      }
 
-      // Anyone can create a note (link generation works without auth)
-      allow create: if true;
-
-      // Anyone can update a note (real-time collaboration)
-      allow update: if true;
-
-      // Only the creator can delete
-      allow delete: if request.auth != null && request.auth.uid == resource.data.userId;
+      allow read:   if request.auth != null && (isOwner() || isCollaborator());
+      allow create: if request.auth != null &&
+                       request.auth.uid == request.resource.data.get('ownerId',
+                         request.resource.data.get('userId', ''));
+      // Owner can always update/delete; editors can update content
+      allow update: if isOwner() || isEditor();
+      allow delete: if isOwner();
     }
   }
 }

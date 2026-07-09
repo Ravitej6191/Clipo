@@ -48,18 +48,26 @@ export const UIProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     setIsConfirmOpen(true);
   };
 
+  // Escape key dismisses confirm dialog
+  useEffect(() => {
+    if (!isConfirmOpen) return;
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') handleCancelAction(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [isConfirmOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleConfirmAction = () => {
-    if (confirm) {
-      confirm.onConfirm();
-    }
+    const cb = confirm?.onConfirm;
     setIsConfirmOpen(false);
+    setConfirm(null);
+    cb?.();
   };
 
   const handleCancelAction = () => {
-    if (confirm && confirm.onCancel) {
-      confirm.onCancel();
-    }
+    const cb = confirm?.onCancel;
     setIsConfirmOpen(false);
+    setConfirm(null);
+    cb?.();
   };
 
   return (

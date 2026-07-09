@@ -2,22 +2,21 @@ export type AttachmentType =
   | 'image'
   | 'video'
   | 'file'
-  | 'link'
   | 'voice'
   | 'checklist'
   | 'code'
-  | 'blockquote'
   | 'table'
   | 'bullet'
   | 'numbered'
   | 'divider'
-  | 'text';
+  | 'text'
+  | 'link';
 
 export interface ChecklistItem {
   id: string;
   text: string;
   completed: boolean;
-  isSection?: boolean; // renders as numbered section header
+  isSection?: boolean;
 }
 
 export interface TableData {
@@ -31,7 +30,9 @@ export interface Attachment {
   id: string;
   type: AttachmentType;
   content: string;
-  cloudinaryPublicId?: string; // stored so we can delete from Cloudinary when removed
+  isDrawing?: boolean;
+  storagePath?: string;
+  fileSizeBytes?: number;
   checklistItems?: ChecklistItem[];
   fileName?: string;
   fileSize?: string;
@@ -42,23 +43,36 @@ export interface Attachment {
   linkImage?: string;
   waveform?: number[];
   codeLanguage?: string;
-  blockquoteColor?: string; // 'purple' | 'orange' | 'gray'
   tableData?: TableData;
-  listItems?: string[];    // for bullet / numbered blocks
+  listItems?: string[];
+}
+
+export type CollaboratorRole = 'viewer' | 'editor';
+
+export interface Collaborator {
+  uid: string;
+  email: string;
+  name?: string;
+  photoURL?: string;
+  role: CollaboratorRole;
+  addedAt: string;
 }
 
 export interface ClipoNote {
   id: string;
   title: string;
-  content: string; // stored as HTML for rich text
+  content: string;
   attachments: Attachment[];
   createdAt: string;
   updatedAt: string;
-  userId: string;
-  shared?: boolean;
-  password?: string;
+  ownerId: string;
+  /** @deprecated use ownerId — kept for Firestore backwards compat */
+  userId?: string;
   label?: string;
   isPinned?: boolean;
+  collaborators?: Collaborator[];
+  collaboratorUids?: string[];
+  pinHash?: string;
 }
 
 export interface UserProfile {
@@ -66,5 +80,4 @@ export interface UserProfile {
   email: string;
   displayName: string;
   photoURL?: string;
-  connectedDevices: string[];
 }

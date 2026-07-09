@@ -10,6 +10,11 @@ interface Props {
 type Tool = 'pen' | 'eraser' | 'circle' | 'line';
 
 const COLORS = ['#111827','#4A8CFF','#7C3AED','#EF4444','#F59E0B','#22C55E','#EC4899','#FFFFFF'];
+const COLOR_NAMES: Record<string, string> = {
+  '#111827': 'Black', '#4A8CFF': 'Blue', '#7C3AED': 'Purple',
+  '#EF4444': 'Red', '#F59E0B': 'Amber', '#22C55E': 'Green',
+  '#EC4899': 'Pink', '#FFFFFF': 'White',
+};
 
 const DrawingCanvas: React.FC<Props> = ({ onSave, onClose, initialDataUrl }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -22,28 +27,38 @@ const DrawingCanvas: React.FC<Props> = ({ onSave, onClose, initialDataUrl }) => 
   const [color, setColor] = useState('#111827');
   const [size, setSize] = useState(3);
 
-  // Resize canvas to fill container
+  // Resize canvas — preserve existing drawing by snapshotting before resize
   const resize = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
+
+    // Snapshot current pixels before resizing erases them
     const ctx = canvas.getContext('2d');
+    const snapshot = (canvas.width > 0 && canvas.height > 0 && ctx)
+      ? canvas.toDataURL()
+      : null;
+
+    canvas.width  = rect.width  * dpr;
+    canvas.height = rect.height * dpr;
     if (ctx) ctx.scale(dpr, dpr);
-    // Restore initial image if any
-    if (initialDataUrl) {
+
+    // Restore snapshot (beats initialDataUrl — user may have drawn over it)
+    const src = snapshot || initialDataUrl;
+    if (src) {
       const img = new Image();
+      img.crossOrigin = 'anonymous';
       img.onload = () => ctx?.drawImage(img, 0, 0, rect.width, rect.height);
-      img.src = initialDataUrl;
+      img.src = src;
     }
   }, [initialDataUrl]);
 
   useEffect(() => {
     resize();
-    window.addEventListener('resize', resize);
-    return () => window.removeEventListener('resize', resize);
+    // Only listen to orientationchange to avoid wiping on virtual keyboard appear
+    window.addEventListener('orientationchange', resize);
+    return () => window.removeEventListener('orientationchange', resize);
   }, [resize]);
 
   const getXY = (e: React.TouchEvent | React.MouseEvent) => {
@@ -206,6 +221,8 @@ const DrawingCanvas: React.FC<Props> = ({ onSave, onClose, initialDataUrl }) => 
       <div className="flex-1 overflow-hidden relative">
         <canvas
           ref={canvasRef}
+          role="img"
+          aria-label="Drawing canvas"
           className="w-full h-full dot-grid-bg touch-none"
           style={{ cursor: tool === 'eraser' ? 'cell' : 'crosshair' }}
           onMouseDown={onPointerDown}
@@ -265,7 +282,7 @@ const DrawingCanvas: React.FC<Props> = ({ onSave, onClose, initialDataUrl }) => 
             <button
               key={c}
               onClick={() => { setColor(c); if (tool === 'eraser') setTool('pen'); }}
-              aria-label={`Color ${c}`}
+              aria-label={COLOR_NAMES[c] ?? c}
               className="w-7 h-7 rounded-full border-2 transition-all"
               style={{
                 backgroundColor: c,

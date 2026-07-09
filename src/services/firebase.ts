@@ -1,6 +1,7 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
+import { getStorage } from 'firebase/storage';
 
 const firebaseConfig = {
   apiKey:            import.meta.env.VITE_FIREBASE_API_KEY,
@@ -18,13 +19,15 @@ export const isFirebaseConfigured = !!(
 
 let auth: ReturnType<typeof getAuth> | null = null;
 let db:   ReturnType<typeof getFirestore> | null = null;
+let storage: ReturnType<typeof getStorage> | null = null;
 let googleProvider: GoogleAuthProvider | null = null;
 
 if (isFirebaseConfigured) {
   try {
     const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-    auth          = getAuth(app);
-    db            = getFirestore(app);
+    auth           = getAuth(app);
+    db             = getFirestore(app);
+    storage        = getStorage(app);
     googleProvider = new GoogleAuthProvider();
     googleProvider.addScope('email');
     googleProvider.addScope('profile');
@@ -33,4 +36,4 @@ if (isFirebaseConfigured) {
   }
 }
 
-export { auth, db, googleProvider };
+export { auth, db, storage, googleProvider };

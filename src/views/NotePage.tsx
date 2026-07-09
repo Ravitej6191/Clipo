@@ -9,16 +9,20 @@ import { useUI } from '../contexts/UIContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ChevronLeft, Check, MoreHorizontal, Play, Pause, Download,
-  ExternalLink, Share2, Lock, Copy, Trash2,
+  ExternalLink, Share2, Copy, Trash2, Eye,
   Image as ImageIcon, Mic, FileText, Link as LinkIcon, Video as VideoIcon,
-  Code, PenLine, ListChecks, Type, Eye, EyeOff,
-  Bold, Italic, Underline, Strikethrough, List, ListOrdered,
+  Code, PenLine, ListChecks, Type,
+  Bold, Italic, Underline, Strikethrough, List, ListOrdered as ListNumbered,
   Heading1, Heading2, Heading3, AlignLeft, AlignCenter, AlignRight,
-  AlignJustify, Indent, Outdent, Highlighter,
+  AlignJustify, Indent, Outdent,
   ChevronUp, ChevronDown, X, Hash, Loader2, Plus,
-  Table2, Minus, Circle, ListOrdered as ListNumbered,
+  Table2, Minus, Circle, HardDrive, GripVertical,
+  Lock, Unlock, KeyRound,
 } from 'lucide-react';
-import { uploadToCloudinary, deleteFromCloudinary } from '../services/cloudinary';
+import { uploadFile as uploadToStorage, deleteFile as deleteFromStorage } from '../services/storage';
+import { useAuth } from '../contexts/AuthContext';
+import ShareSheet from '../components/ShareSheet';
+import DOMPurify from 'dompurify';
 import imageCompression from 'browser-image-compression';
 import hljs from 'highlight.js/lib/core';
 import javascript from 'highlight.js/lib/languages/javascript';
@@ -41,7 +45,7 @@ hljs.registerLanguage('bash', bash);
 // ─── File validation ──────────────────────────────────────────────────────────
 const ALLOWED_TYPES: Record<'image' | 'video' | 'file', string[]> = {
   image: ['image/jpeg','image/jpg','image/png','image/gif','image/webp','image/svg+xml'],
-  video: ['video/mp4','video/webm','video/ogg','video/quicktime','video/x-msvideo'],
+  video: ['video/mp4','video/webm','video/ogg','video/quicktime'],
   file: [
     'application/pdf','application/msword',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -52,37 +56,109 @@ const ALLOWED_TYPES: Record<'image' | 'video' | 'file', string[]> = {
     'text/plain','application/zip','text/csv',
   ],
 };
-const MAX_MB: Record<'image' | 'video' | 'file', number> = { image: 10, video: 200, file: 50 };
+
+// Allowed file extensions per type (double-check alongside MIME)
+const ALLOWED_EXTS: Record<'image' | 'video' | 'file', string[]> = {
+  image: ['jpg','jpeg','png','gif','webp','svg'],
+  video: ['mp4','webm','ogg','mov'],
+  file:  ['pdf','doc','docx','xls','xlsx','ppt','pptx','txt','zip','csv'],
+};
+
+const MAX_MB: Record<'image' | 'video' | 'file', number> = { image: 10, video: 100, file: 25 };
+const MAX_NOTE_MB  = 150;   // total attachments per note
+const MAX_VOICE_MB = 20;    // per voice recording
+
 const EXT_LABELS: Record<'image' | 'video' | 'file', string> = {
   image: 'JPG, PNG, GIF, WebP, SVG',
   video: 'MP4, WebM, OGG, MOV',
   file: 'PDF, DOC, XLS, PPT, TXT, ZIP, CSV',
 };
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-const uid = () => Math.random().toString(36).slice(2, 9);
-const fmtDuration = (s: number) =>
-  `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
-const fmtDate = (iso: string) =>
-  new Date(iso).toLocaleDateString([], {
-    weekday: 'short', month: 'long', day: 'numeric', year: 'numeric',
-  });
+// Magic-byte signatures to verify actual file content
+const MAGIC: Array<{ mime: string; bytes: number[]; offset?: number }> = [
+  { mime: 'image/jpeg',   bytes: [0xFF,0xD8,0xFF] },
+  { mime: 'image/png',    bytes: [0x89,0x50,0x4E,0x47] },
+  { mime: 'image/gif',    bytes: [0x47,0x49,0x46] },
+  { mime: 'image/webp',   bytes: [0x52,0x49,0x46,0x46], offset: 0 },
+  { mime: 'application/pdf', bytes: [0x25,0x50,0x44,0x46] },
+  { mime: 'application/zip', bytes: [0x50,0x4B,0x03,0x04] },
+  { mime: 'video/mp4',    bytes: [0x66,0x74,0x79,0x70], offset: 4 },
+];
 
-// ─── Upload helper (Cloudinary) ───────────────────────────────────────────────
-async function uploadFile(
-  blob: Blob,
-  fileName: string,
-  onProgress?: (pct: number) => void,
-): Promise<{ url: string; publicId: string }> {
-  return uploadToCloudinary(blob, fileName, onProgress);
+async function checkMagicBytes(file: File): Promise<boolean> {
+  // SVG and text files have no magic bytes — skip check
+  if (file.type === 'image/svg+xml' || file.type === 'text/plain' || file.type === 'text/csv') return true;
+  const buf = await file.slice(0, 12).arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  for (const sig of MAGIC) {
+    if (!file.type.startsWith(sig.mime.split('/')[0]) && file.type !== sig.mime) continue;
+    const off = sig.offset ?? 0;
+    if (sig.bytes.every((b, i) => bytes[off + i] === b)) return true;
+  }
+  // If no signature matched for a known-signatured type, fail
+  const siggedTypes = MAGIC.map(m => m.mime);
+  if (siggedTypes.includes(file.type)) return false;
+  return true; // unknown type with no signature rule — allow (MIME + ext already checked)
 }
 
-// MIME type lookup for Cloudinary deletion
-function mimeForAtt(att: Attachment): string {
-  if (att.type === 'image') return 'image/jpeg';
-  if (att.type === 'video') return 'video/mp4';
-  if (att.type === 'voice') return 'audio/webm';
-  return 'application/octet-stream';
+type FileType = 'image' | 'video' | 'file';
+
+async function validateFile(file: File, type: FileType, existingBytes: number): Promise<{ ok: boolean; reason?: string }> {
+  // 1. Empty file
+  if (file.size === 0) return { ok: false, reason: 'File is empty.' };
+
+  // 2. Extension check
+  const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+  if (!ALLOWED_EXTS[type].includes(ext))
+    return { ok: false, reason: `Invalid file type. Allowed: ${EXT_LABELS[type]}.` };
+
+  // 3. MIME type check
+  if (file.type && !ALLOWED_TYPES[type].includes(file.type))
+    return { ok: false, reason: `Unsupported format (${file.type}). Allowed: ${EXT_LABELS[type]}.` };
+
+  // 4. Per-file size limit
+  const fileMB = file.size / 1024 / 1024;
+  if (fileMB > MAX_MB[type])
+    return { ok: false, reason: `File too large (${fileMB.toFixed(1)} MB). Max ${MAX_MB[type]} MB for ${type}s.` };
+
+  // 5. Per-note total quota
+  const totalMB = (existingBytes + file.size) / 1024 / 1024;
+  if (totalMB > MAX_NOTE_MB)
+    return { ok: false, reason: `Note would exceed ${MAX_NOTE_MB} MB total. Remove some files first.` };
+
+  // 6. Magic bytes (content vs extension spoofing)
+  const magicOk = await checkMagicBytes(file);
+  if (!magicOk) return { ok: false, reason: 'File content does not match its extension. Upload rejected.' };
+
+  return { ok: true };
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const uid = () => Math.random().toString(36).slice(2, 9);
+const formatBytes = (b: number) => b < 1024 ? `${b} B` : b < 1024 ** 2 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1024 ** 2).toFixed(1)} MB`;
+const fmtDuration = (s: number) =>
+  `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
+const fmtDate = (iso: string) => {
+  const d = new Date(iso);
+  const date = d.toLocaleDateString([], { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' });
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return `${date}, ${time}`;
+};
+
+// ─── PIN hash ────────────────────────────────────────────────────────────────
+async function hashPin(pin: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pin));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ─── Upload helper (Firebase Storage) ────────────────────────────────────────
+async function uploadFile(
+  blob: Blob,
+  userId: string,
+  fileName: string,
+  onProgress?: (pct: number) => void,
+): Promise<{ url: string; storagePath: string; bytes: number }> {
+  return uploadToStorage(blob, userId, fileName, onProgress);
 }
 
 // ─── Open Graph link preview ──────────────────────────────────────────────────
@@ -176,6 +252,7 @@ const CodeBlock: React.FC<{
   onLanguageChange: (lang: string) => void;
 }> = ({ att, onChange, onLanguageChange }) => {
   const [editing, setEditing] = useState(false);
+  const [copied, setCopied] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const highlighted = att.codeLanguage && att.codeLanguage !== 'other' && att.content
     ? hljs.highlight(att.content, { language: att.codeLanguage, ignoreIllegals: true }).value
@@ -206,9 +283,17 @@ const CodeBlock: React.FC<{
             {editing ? 'Preview' : 'Edit'}
           </button>
           <div className="w-px h-3 bg-white/10" />
-          <button onClick={() => { navigator.clipboard.writeText(att.content); }}
-            aria-label="Copy code" className="text-xs text-white/40 hover:text-white/80 flex items-center gap-1 transition-colors">
-            <Copy className="w-3 h-3" /> Copy
+          <button
+            onClick={() => {
+              navigator.clipboard.writeText(att.content).then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              }).catch(() => {});
+            }}
+            aria-label="Copy code"
+            className="text-xs text-white/40 hover:text-white/80 flex items-center gap-1 transition-colors"
+          >
+            {copied ? <><svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"/></svg> Copied!</> : <><Copy className="w-3 h-3" /> Copy</>}
           </button>
         </div>
       </div>
@@ -345,13 +430,15 @@ const ChecklistBlock: React.FC<{
 interface NotePageProps {
   noteId: string;
   onBack: () => void;
+  onNoteDeleted?: () => void; // bypasses guest-leave warning (note already gone)
 }
 
 type ToolTab = 'media' | 'list' | 'format' | 'code';
 
-const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
+const NotePage: React.FC<NotePageProps> = ({ noteId, onBack, onNoteDeleted }) => {
   const { notes, updateNote, deleteNote, subscribeSharedNote } = useNotes();
   const { showToast, showConfirm } = useUI();
+  const { user } = useAuth();
 
   // ── Live note state (via Firestore onSnapshot or localStorage) ────────────
   const [note, setNote] = useState<Parameters<typeof updateNote>[1] & { id: string; updatedAt: string; password?: string } | null>(null);
@@ -364,32 +451,40 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
   // ── Local state ──────────────────────────────────────────────────────────
   const [noteNotFound, setNoteNotFound] = useState(false);
   const [attachments, setAttachments]   = useState<Attachment[]>([]);
-  const [notePassword, setNotePassword] = useState('');
+  const dragIndexRef = useRef<number | null>(null);
   const [playingId, setPlayingId]       = useState<string | null>(null);
   const playAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Upload progress map: attId → percentage
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
 
+  // Drawing edit
+  const [editingDrawingId, setEditingDrawingId] = useState<string | null>(null);
+
+  // PIN lock
+  const [pinLocked, setPinLocked]         = useState(false);
+  const [pinInput, setPinInput]           = useState('');
+  const [pinError, setPinError]           = useState(false);
+  const [showPinSetup, setShowPinSetup]   = useState(false);
+  const [pinSetupStep, setPinSetupStep]   = useState<'enter' | 'confirm'>('enter');
+  const [pinSetupFirst, setPinSetupFirst] = useState('');
+  const [pinSetupVal, setPinSetupVal]     = useState('');
+
   // Sheet visibility
   const [showContext, setShowContext]     = useState(false);
+  const [showShare, setShowShare]         = useState(false);
   const [showVoice, setShowVoice]         = useState(false);
   const [showDrawing, setShowDrawing]     = useState(false);
   const [showLinkSheet, setShowLinkSheet] = useState(false);
   const [linkInput, setLinkInput]         = useState('');
   const [linkLoading, setLinkLoading]     = useState(false);
-  const [showExitWarn, setShowExitWarn]   = useState(false);
-
+  const [showExitWarn, setShowExitWarn]     = useState(false);
   // Bottom toolbar
   const [activeTab, setActiveTab] = useState<ToolTab | null>(null);
 
   // Save status
-  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving'>('saved');
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error'>('saved');
 
-  // Lock screen
-  const [locked, setLocked]             = useState(false);
-  const [unlockInput, setUnlockInput]   = useState('');
-  const [showUnlockPw, setShowUnlockPw] = useState(false);
 
   // File input refs
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -409,11 +504,8 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
     const local = notes.find(n => n.id === noteId);
     if (local && !initialized.current) {
       setNote(local as any);
-      setNotePassword(local.password ?? '');
       setAttachments(local.attachments ?? []);
       initialized.current = true;
-      const key = `clipo_verified_${noteId}`;
-      if (local.password && !sessionStorage.getItem(key)) setLocked(true);
     }
   }, [noteId, notes]);
 
@@ -424,7 +516,7 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
     if (domSeeded.current || !note) return;
     if (!titleRef.current || !bodyRef.current) return;
     titleRef.current.textContent = (note as any).title || '';
-    bodyRef.current.innerHTML   = (note as any).content || '';
+    bodyRef.current.innerHTML   = DOMPurify.sanitize((note as any).content || '');
     domSeeded.current = true;
   }, [note]);
 
@@ -450,13 +542,15 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
         clearTimeout(notFoundTimer);
         setNote(n as any);
         if (!initialized.current) {
-          // First load via Firestore — covers shared/guest notes not in local notes state.
-          // Effect 2 will populate the DOM once the editor mounts after setNote triggers a re-render.
-          setNotePassword(n.password ?? '');
           setAttachments(n.attachments ?? []);
           initialized.current = true;
-          const key = `clipo_verified_${noteId}`;
-          if (n.password && !sessionStorage.getItem(key)) setLocked(true);
+        } else {
+          // Keep attachments in sync with server (e.g. collaborator adds a file)
+          // Only update if we're not mid-upload (no pending upload progress)
+          setAttachments(prev => {
+            const hasPending = prev.some(a => !a.content);
+            return hasPending ? prev : (n.attachments ?? []);
+          });
         }
       },
       () => {
@@ -468,6 +562,15 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
     return () => { unsub(); clearTimeout(notFoundTimer); };
   }, [noteId, subscribeSharedNote]);
 
+  // Lock note on open if it has a PIN
+  useEffect(() => {
+    if ((note as any)?.pinHash) setPinLocked(true);
+  }, [noteId]); // only on noteId change, not every note update
+
+  // Ref so auto-save always reads the latest attachments without stale closure
+  const attachmentsRef = useRef<Attachment[]>([]);
+  useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
+
   // ── Auto-save ────────────────────────────────────────────────────────────
   const scheduleAutoSave = useCallback((newAtts?: Attachment[]) => {
     setSaveStatus('saving');
@@ -478,13 +581,15 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
       try {
         await updateNote(noteId, {
           title, content,
-          attachments: newAtts ?? attachments,
+          attachments: newAtts ?? attachmentsRef.current,
           updatedAt: new Date().toISOString(),
         });
-      } catch { /* retain last saved state on Firestore error */ }
-      setSaveStatus('saved');
+        setSaveStatus('saved');
+      } catch {
+        setSaveStatus('error');
+      }
     }, 1000);
-  }, [noteId, updateNote, attachments]);
+  }, [noteId, updateNote]);
 
   // Clear pending auto-save timer on unmount to avoid state updates after navigation
   useEffect(() => {
@@ -508,15 +613,6 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
     doSaveAndBack();
   };
 
-  // ── Unlock ───────────────────────────────────────────────────────────────
-  const handleUnlock = () => {
-    if (unlockInput === notePassword) {
-      sessionStorage.setItem(`clipo_verified_${noteId}`, '1');
-      setLocked(false); setUnlockInput('');
-    } else {
-      showToast('Incorrect password', 'error');
-    }
-  };
 
   // ── Attachment helpers ───────────────────────────────────────────────────
   const addAttachment = (att: Attachment) => {
@@ -535,10 +631,8 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
         const next = attachments.filter(a => a.id !== id);
         setAttachments(next);
         scheduleAutoSave(next);
-        // Best-effort Cloudinary delete for uploaded media
-        if (att?.cloudinaryPublicId) {
-          deleteFromCloudinary(att.cloudinaryPublicId, mimeForAtt(att));
-        }
+        // Best-effort Firebase Storage delete
+        if (att?.storagePath) deleteFromStorage(att.storagePath);
       },
     });
   };
@@ -554,6 +648,22 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
       return arr;
     });
   };
+
+  const handleDragStart = (idx: number) => { dragIndexRef.current = idx; };
+  const handleDragOver  = (e: React.DragEvent, idx: number) => {
+    e.preventDefault();
+    const from = dragIndexRef.current;
+    if (from === null || from === idx) return;
+    setAttachments(prev => {
+      const arr = [...prev];
+      const [item] = arr.splice(from, 1);
+      arr.splice(idx, 0, item);
+      dragIndexRef.current = idx;
+      scheduleAutoSave(arr);
+      return arr;
+    });
+  };
+  const handleDragEnd = () => { dragIndexRef.current = null; };
 
   const toggleCheckItem = (attId: string, itemId: string) => {
     setAttachments(prev => {
@@ -713,31 +823,32 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
 
   const handleFileSelected = async (type: 'image' | 'video' | 'file', file?: File) => {
     if (!file) return;
-    if (!ALLOWED_TYPES[type].includes(file.type)) {
-      showToast(`Unsupported format. Allowed: ${EXT_LABELS[type]}`, 'error'); return;
-    }
-    const sizeMB = file.size / 1024 / 1024;
-    if (sizeMB > MAX_MB[type]) {
-      showToast(`File too large. Max ${MAX_MB[type]} MB for ${type}s.`, 'error'); return;
-    }
 
+    const existingBytes = attachments.reduce((s, a) => s + (a.fileSizeBytes ?? 0), 0);
+    const result = await validateFile(file, type, existingBytes);
+    if (!result.ok) { showToast(result.reason!, 'error'); return; }
+
+    // Duplicate check — same name + size already attached
+    const isDupe = attachments.some(a => a.fileName === file.name && a.fileSizeBytes === file.size);
+    if (isDupe) { showToast('This file is already attached.', 'error'); return; }
+
+    const sizeMB = file.size / 1024 / 1024;
     const attId = uid();
     const placeholder: Attachment = {
       id: attId, type: type as any,
       content: '',
       fileName: file.name,
       fileSize: `${sizeMB.toFixed(1)} MB`,
+      fileSizeBytes: file.size,
       ...(type === 'file' ? { fileType: file.type } : {}),
     };
 
-    // Show placeholder immediately
     const withPlaceholder = [...attachments, placeholder];
     setAttachments(withPlaceholder);
 
     try {
       let blob: Blob = file;
 
-      // Compress images before upload
       if (type === 'image') {
         blob = await imageCompression(file, {
           maxSizeMB: 2,
@@ -746,23 +857,21 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
         });
       }
 
-      const { url, publicId } = await uploadFile(
-        blob, file.name,
+      const { url, storagePath, bytes } = await uploadFile(
+        blob, user?.uid ?? 'anon', file.name,
         (pct) => setUploadProgress(prev => ({ ...prev, [attId]: pct })),
       );
 
       setUploadProgress(prev => { const n = { ...prev }; delete n[attId]; return n; });
 
       const finalAtts = withPlaceholder.map(a =>
-        a.id === attId ? { ...a, content: url, cloudinaryPublicId: publicId || undefined } : a,
+        a.id === attId ? { ...a, content: url, storagePath: storagePath || undefined, fileSizeBytes: bytes || undefined } : a,
       );
       setAttachments(finalAtts);
       scheduleAutoSave(finalAtts);
-    } catch (err) {
-      console.error('[upload]', err);
-      showToast('Upload failed. Try again.', 'error');
-      const without = withPlaceholder.filter(a => a.id !== attId);
-      setAttachments(without);
+    } catch {
+      showToast('Upload failed. Please try again.', 'error');
+      setAttachments(withPlaceholder.filter(a => a.id !== attId));
       setUploadProgress(prev => { const n = { ...prev }; delete n[attId]; return n; });
     }
   };
@@ -772,11 +881,26 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
     const attId = uid();
     try {
       const blob = await fetch(url).then(r => r.blob());
-      const { url: storageUrl, publicId } = await uploadFile(blob, 'voice.webm',
+
+      // Voice size guard
+      const voiceMB = blob.size / 1024 / 1024;
+      if (voiceMB > MAX_VOICE_MB) {
+        showToast(`Voice recording too large (${voiceMB.toFixed(1)} MB). Max ${MAX_VOICE_MB} MB.`, 'error');
+        return;
+      }
+      const existingBytes = attachments.reduce((s, a) => s + (a.fileSizeBytes ?? 0), 0);
+      const totalMB = (existingBytes + blob.size) / 1024 / 1024;
+      if (totalMB > MAX_NOTE_MB) {
+        showToast(`Note would exceed ${MAX_NOTE_MB} MB total. Remove some files first.`, 'error');
+        return;
+      }
+
+      const { url: storageUrl, storagePath, bytes } = await uploadFile(
+        blob, user?.uid ?? 'anon', 'voice.webm',
         (pct) => setUploadProgress(prev => ({ ...prev, [attId]: pct })),
       );
       setUploadProgress(prev => { const n = { ...prev }; delete n[attId]; return n; });
-      addAttachment({ id: attId, type: 'voice', content: storageUrl, duration: dur, waveform: wf, cloudinaryPublicId: publicId || undefined });
+      addAttachment({ id: attId, type: 'voice', content: storageUrl, duration: dur, waveform: wf, storagePath: storagePath || undefined, fileSizeBytes: bytes || undefined });
     } catch {
       showToast('Voice upload failed.', 'error');
     }
@@ -820,12 +944,9 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
   };
 
   // ── Share ────────────────────────────────────────────────────────────────
-  const shareLink = () => {
-    const url = `${window.location.origin}${window.location.pathname}?share=${noteId}`;
-    navigator.clipboard.writeText(url)
-      .then(() => showToast('Link copied!', 'success'))
-      .catch(() => showToast('Could not copy — try manually', 'error'));
+  const openShare = () => {
     setShowContext(false);
+    setShowShare(true);
   };
 
   // ── Delete ───────────────────────────────────────────────────────────────
@@ -835,53 +956,76 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
       title: 'Delete Space', message: 'This cannot be undone.',
       confirmLabel: 'Delete', isDanger: true,
       onConfirm: () => {
-        // Delete all Cloudinary assets first (best-effort, non-blocking)
-        attachments.forEach(att => {
-          if (att.cloudinaryPublicId) {
-            deleteFromCloudinary(att.cloudinaryPublicId, mimeForAtt(att));
-          }
-        });
+        // Delete all Firebase Storage assets (best-effort, non-blocking)
+        attachments.forEach(att => { if (att.storagePath) deleteFromStorage(att.storagePath); });
         deleteNote(noteId)
-          .then(() => onBack())
+          .then(() => (onNoteDeleted ?? onBack)())
           .catch(() => showToast('Delete failed. Try again.', 'error'));
       },
     });
   };
 
-  // ── Lock screen ──────────────────────────────────────────────────────────
-  if (locked) {
-    return (
-      <div className="min-h-screen bg-white flex flex-col items-center justify-center px-8 gap-6">
-        <div className="w-16 h-16 rounded-3xl bg-gradient-to-br from-[#111827] to-[#7C3AED] flex items-center justify-center shadow-lg">
-          <Lock className="w-7 h-7 text-white" />
-        </div>
-        <div className="text-center">
-          <h2 className="text-lg font-black text-[#111827]">Protected Space</h2>
-          <p className="text-sm text-gray-400 mt-1">Enter the password to access this space</p>
-        </div>
-        <div className="w-full max-w-xs relative">
-          <input
-            type={showUnlockPw ? 'text' : 'password'}
-            value={unlockInput}
-            onChange={e => setUnlockInput(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') handleUnlock(); }}
-            placeholder="Password"
-            autoFocus
-            className="w-full bg-[#F9FAFB] border border-gray-200 rounded-2xl px-4 py-3.5 text-sm outline-none focus:border-[#7C3AED] focus:ring-2 focus:ring-[#7C3AED]/10 pr-12"
-          />
-          <button onClick={() => setShowUnlockPw(p => !p)} aria-label="Toggle password"
-            className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-400">
-            {showUnlockPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-          </button>
-        </div>
-        <button onClick={handleUnlock} disabled={!unlockInput}
-          className="w-full max-w-xs py-3.5 bg-gradient-to-br from-[#111827] to-[#7C3AED] text-white font-bold rounded-2xl disabled:opacity-40">
-          Unlock
-        </button>
-        <button onClick={onBack} className="text-sm text-gray-400">Go back</button>
-      </div>
-    );
-  }
+
+  // ── PIN unlock ──────────────────────────────────────────────────────────────
+  const handlePinDigit = async (d: string) => {
+    const next = (pinInput + d).slice(0, 4);
+    setPinInput(next);
+    setPinError(false);
+    if (next.length === 4) {
+      const h = await hashPin(next);
+      if (h === (note as any)?.pinHash) {
+        setPinLocked(false);
+        setPinInput('');
+      } else {
+        setPinError(true);
+        setTimeout(() => { setPinInput(''); setPinError(false); }, 600);
+      }
+    }
+  };
+
+  // ── PIN setup ───────────────────────────────────────────────────────────────
+  const handlePinSetupDigit = async (d: string) => {
+    const next = (pinSetupVal + d).slice(0, 4);
+    setPinSetupVal(next);
+    if (next.length === 4) {
+      if (pinSetupStep === 'enter') {
+        setPinSetupFirst(next);
+        setPinSetupStep('confirm');
+        setPinSetupVal('');
+      } else {
+        if (next === pinSetupFirst) {
+          const h = await hashPin(next);
+          await updateNote(noteId, { ...(note as any), pinHash: h });
+          setShowPinSetup(false);
+          setPinSetupStep('enter');
+          setPinSetupFirst('');
+          setPinSetupVal('');
+          showToast('PIN set successfully.', 'success');
+        } else {
+          showToast('PINs don\'t match. Try again.', 'error');
+          setPinSetupStep('enter');
+          setPinSetupFirst('');
+          setPinSetupVal('');
+        }
+      }
+    }
+  };
+
+  const handleRemovePin = async () => {
+    setShowContext(false);
+    showConfirm({
+      title: 'Remove PIN Lock',
+      message: 'This note will no longer require a PIN to open.',
+      confirmLabel: 'Remove',
+      isDanger: true,
+      onConfirm: async () => {
+        const updated = { ...(note as any) };
+        delete updated.pinHash;
+        await updateNote(noteId, updated);
+        showToast('PIN removed.', 'success');
+      },
+    });
+  };
 
   if (noteNotFound) {
     return (
@@ -914,6 +1058,55 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
     );
   }
 
+  // ── PIN lock screen ───────────────────────────────────────────────────────
+  if (pinLocked) {
+    const NUMPAD = [1,2,3,4,5,6,7,8,9,null,0,'⌫'] as const;
+    return (
+      <div className="min-h-screen bg-white flex flex-col items-center justify-center px-8 gap-7">
+        <button onClick={onBack} className="absolute top-4 left-4 w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center">
+          <ChevronLeft className="w-5 h-5 text-[#374151]" />
+        </button>
+
+        <div className={`w-14 h-14 rounded-3xl flex items-center justify-center transition-colors ${pinError ? 'bg-red-50' : 'bg-gray-100'}`}>
+          <Lock className={`w-7 h-7 ${pinError ? 'text-red-500' : 'text-[#111827]'}`} />
+        </div>
+
+        <div className="text-center">
+          <h2 className="text-lg font-black text-[#111827]">Locked</h2>
+          <p className="text-sm text-gray-400 mt-0.5">{(note as any)?.title || 'This note'}</p>
+        </div>
+
+        {/* 4 dot indicator */}
+        <div className={`flex gap-3 transition-all ${pinError ? 'animate-shake' : ''}`}>
+          {[0,1,2,3].map(i => (
+            <div key={i} className={`w-3.5 h-3.5 rounded-full transition-all ${
+              pinError ? 'bg-red-400' : pinInput.length > i ? 'bg-[#111827] scale-110' : 'border-2 border-gray-300'
+            }`} />
+          ))}
+        </div>
+
+        {/* Number pad */}
+        <div className="grid grid-cols-3 gap-3 w-full max-w-xs">
+          {NUMPAD.map((n, i) => {
+            if (n === null) return <div key={i} />;
+            if (n === '⌫') return (
+              <button key={i} onClick={() => { setPinInput(p => p.slice(0,-1)); setPinError(false); }}
+                className="h-16 rounded-2xl bg-gray-100 flex items-center justify-center text-lg font-semibold text-[#374151] active:scale-95 transition-transform">
+                {n}
+              </button>
+            );
+            return (
+              <button key={i} onClick={() => handlePinDigit(String(n))}
+                className="h-16 rounded-2xl bg-gray-100 flex items-center justify-center text-xl font-bold text-[#111827] active:scale-95 active:bg-gray-200 transition-all">
+                {n}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
   // ── Main editor ───────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-white flex flex-col">
@@ -927,11 +1120,16 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
 
         <div className="flex-1" />
 
-        {notePassword && (
-          <div className="w-7 h-7 rounded-full bg-violet-50 border border-violet-100 flex items-center justify-center">
-            <Lock className="w-3 h-3 text-[#7C3AED]" />
-          </div>
-        )}
+        {/* Note size chip — shown for all users */}
+        {(() => {
+          const noteBytes = attachments.reduce((s, a) => s + (a.fileSizeBytes ?? 0), 0);
+          return (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-transparent bg-gray-100 text-[10px] font-semibold text-[#6B7280]">
+              <HardDrive className="w-3 h-3" />
+              {noteBytes > 0 ? formatBytes(noteBytes) : 'Empty'}
+            </div>
+          );
+        })()}
 
         {/* Sync status */}
         <AnimatePresence mode="wait">
@@ -944,6 +1142,16 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
               </svg>
               <span className="text-[10px] font-semibold text-[#6B7280]">Saving…</span>
+            </motion.div>
+          ) : saveStatus === 'error' ? (
+            <motion.div key="error"
+              initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 4 }}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-50 cursor-pointer"
+              onClick={() => scheduleAutoSave()}>
+              <svg className="w-3 h-3 text-red-400" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+              </svg>
+              <span className="text-[10px] font-semibold text-red-500">Not saved — tap to retry</span>
             </motion.div>
           ) : (
             <motion.div key="saved"
@@ -965,8 +1173,11 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
 
       {/* ── SCROLLABLE CONTENT ── */}
       <main className="flex-1 px-5 pb-56 overflow-y-auto">
-        <div className="flex items-center gap-2 mt-2 mb-3">
-          <span className="text-[10px] text-gray-400">{fmtDate((note as any).updatedAt || new Date().toISOString())}</span>
+        <div className="flex items-center gap-1.5 mt-2 mb-3">
+          <svg className="w-3 h-3 text-gray-300 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          <span className="text-[10px] text-gray-400">Last edited {fmtDate((note as any).updatedAt || new Date().toISOString())}</span>
         </div>
 
         {/* Title */}
@@ -998,9 +1209,21 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
         {attachments.length > 0 && (
           <div className="flex flex-col gap-3 mt-5">
             {attachments.map((att, idx) => (
-              <div key={att.id} className="relative">
+              <div
+                key={att.id}
+                className="relative"
+                draggable
+                onDragStart={() => handleDragStart(idx)}
+                onDragOver={e => handleDragOver(e, idx)}
+                onDragEnd={handleDragEnd}
+              >
                 {/* Reorder + delete controls */}
                 <div className="absolute -top-2 right-0 z-10 flex items-center gap-1">
+                  {/* Drag handle */}
+                  <div aria-label="Drag to reorder"
+                    className="w-6 h-6 rounded-full bg-white border border-gray-200 shadow-sm flex items-center justify-center cursor-grab active:cursor-grabbing">
+                    <GripVertical className="w-3 h-3 text-gray-400" />
+                  </div>
                   {idx > 0 && (
                     <button onClick={() => moveAttachment(att.id, 'up')} aria-label="Move up"
                       className="w-6 h-6 rounded-full bg-white border border-gray-200 shadow-sm flex items-center justify-center">
@@ -1050,15 +1273,25 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
                     {uploadProgress[att.id] !== undefined && (
                       <UploadProgress pct={uploadProgress[att.id]} />
                     )}
-                    {att.fileName && att.content && (
-                      <div className="px-3 py-2 bg-gray-50 flex items-center justify-between">
-                        <span className="text-xs text-gray-500 truncate">{att.fileName}</span>
-                        <a href={att.content} download={att.fileName} aria-label="Download"
-                          className="w-6 h-6 flex items-center justify-center text-gray-400">
-                          <Download className="w-3.5 h-3.5" />
-                        </a>
+                    <div className="px-3 py-2 bg-gray-50 flex items-center justify-between">
+                      <span className="text-xs text-gray-500 truncate">{att.fileName || 'Image'}</span>
+                      <div className="flex items-center gap-1">
+                        {att.isDrawing && att.content && (
+                          <button
+                            onClick={() => { setEditingDrawingId(att.id); setShowDrawing(true); }}
+                            aria-label="Edit drawing"
+                            className="w-6 h-6 flex items-center justify-center text-[#7C3AED] hover:bg-purple-50 rounded-lg transition-colors">
+                            <PenLine className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        {att.content && !att.isDrawing && (
+                          <a href={att.content} download={att.fileName} aria-label="Download"
+                            className="w-6 h-6 flex items-center justify-center text-gray-400">
+                            <Download className="w-3.5 h-3.5" />
+                          </a>
+                        )}
                       </div>
-                    )}
+                    </div>
                   </div>
                 )}
 
@@ -1539,10 +1772,33 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
       {/* Context menu */}
       <Sheet open={showContext} onClose={() => setShowContext(false)}>
         <div className="px-4 pt-4 pb-2">
-          <button onClick={shareLink} className="w-full flex items-center gap-3.5 py-3.5 text-left">
+          <button onClick={openShare} className="w-full flex items-center gap-3.5 py-3.5 text-left">
             <Share2 className="w-4 h-4 text-[#374151] shrink-0" />
-            <span className="flex-1 text-sm font-medium text-[#111827]">Share Link</span>
+            <span className="flex-1 text-sm font-medium text-[#111827]">Share & Collaborate</span>
           </button>
+
+          {/* PIN options */}
+          {!(note as any)?.pinHash ? (
+            <button onClick={() => { setShowContext(false); setPinSetupStep('enter'); setPinSetupVal(''); setPinSetupFirst(''); setShowPinSetup(true); }}
+              className="w-full flex items-center gap-3.5 py-3.5 border-t border-gray-50 text-left">
+              <Lock className="w-4 h-4 text-[#374151] shrink-0" />
+              <span className="flex-1 text-sm font-medium text-[#111827]">Set PIN Lock</span>
+            </button>
+          ) : (
+            <>
+              <button onClick={() => { setShowContext(false); setPinSetupStep('enter'); setPinSetupVal(''); setPinSetupFirst(''); setShowPinSetup(true); }}
+                className="w-full flex items-center gap-3.5 py-3.5 border-t border-gray-50 text-left">
+                <KeyRound className="w-4 h-4 text-[#374151] shrink-0" />
+                <span className="flex-1 text-sm font-medium text-[#111827]">Change PIN</span>
+              </button>
+              <button onClick={handleRemovePin}
+                className="w-full flex items-center gap-3.5 py-3.5 border-t border-gray-50 text-left">
+                <Unlock className="w-4 h-4 text-amber-500 shrink-0" />
+                <span className="flex-1 text-sm font-medium text-amber-600">Remove PIN Lock</span>
+              </button>
+            </>
+          )}
+
           <button onClick={handleDelete} className="w-full flex items-center gap-3.5 py-3.5 border-t border-gray-50">
             <Trash2 className="w-4 h-4 text-red-500" />
             <span className="text-sm font-semibold text-red-500 flex-1 text-left">Delete Space</span>
@@ -1616,6 +1872,52 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
         )}
       </AnimatePresence>
 
+      {/* Share sheet */}
+      {note && (
+        <ShareSheet
+          open={showShare}
+          onClose={() => setShowShare(false)}
+          note={note as any}
+          isOwner={(note as any).ownerId === user?.uid}
+        />
+      )}
+
+      {/* PIN Setup sheet */}
+      <Sheet open={showPinSetup} onClose={() => setShowPinSetup(false)}
+        title={pinSetupStep === 'enter' ? 'Set a PIN' : 'Confirm PIN'}>
+        <div className="px-6 pb-10 pt-4 flex flex-col items-center gap-6">
+          <p className="text-xs text-gray-400 text-center">
+            {pinSetupStep === 'enter' ? 'Enter a 4-digit PIN to lock this note.' : 'Enter the PIN again to confirm.'}
+          </p>
+          {/* 4 dot indicator */}
+          <div className="flex gap-3">
+            {[0,1,2,3].map(i => (
+              <div key={i} className={`w-3.5 h-3.5 rounded-full transition-all ${
+                pinSetupVal.length > i ? 'bg-[#111827] scale-110' : 'border-2 border-gray-300'
+              }`} />
+            ))}
+          </div>
+          {/* Number pad */}
+          <div className="grid grid-cols-3 gap-3 w-full max-w-xs">
+            {([1,2,3,4,5,6,7,8,9,null,0,'⌫'] as const).map((n, i) => {
+              if (n === null) return <div key={i} />;
+              if (n === '⌫') return (
+                <button key={i} onClick={() => setPinSetupVal(p => p.slice(0,-1))}
+                  className="h-14 rounded-2xl bg-gray-100 flex items-center justify-center text-lg font-semibold text-[#374151] active:scale-95 transition-transform">
+                  {n}
+                </button>
+              );
+              return (
+                <button key={i} onClick={() => handlePinSetupDigit(String(n))}
+                  className="h-14 rounded-2xl bg-gray-100 flex items-center justify-center text-xl font-bold text-[#111827] active:scale-95 active:bg-gray-200 transition-all">
+                  {n}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </Sheet>
+
       {/* Drawing canvas */}
       <AnimatePresence>
         {showDrawing && (
@@ -1623,19 +1925,39 @@ const NotePage: React.FC<NotePageProps> = ({ noteId, onBack }) => {
             transition={{ type: 'spring', damping: 28, stiffness: 300 }}
             className="fixed inset-0 z-50">
             <DrawingCanvas
-              onClose={() => setShowDrawing(false)}
+              initialDataUrl={editingDrawingId
+                ? attachments.find(a => a.id === editingDrawingId)?.content
+                : undefined}
+              onClose={() => { setShowDrawing(false); setEditingDrawingId(null); }}
               onSave={async (dataUrl) => {
                 setShowDrawing(false);
-                const attId = uid();
-                const placeholder: Attachment = { id: attId, type: 'image', content: '', fileName: 'Drawing' };
-                const withPlaceholder = [...attachments, placeholder];
+                const isEdit = !!editingDrawingId;
+                const attId = editingDrawingId ?? uid();
+                setEditingDrawingId(null);
+
+                // Delete old storage file if editing
+                if (isEdit) {
+                  const old = attachments.find(a => a.id === attId);
+                  if (old?.storagePath) deleteFromStorage(old.storagePath);
+                }
+
+                const placeholder: Attachment = {
+                  id: attId, type: 'image', content: '',
+                  fileName: 'Drawing', isDrawing: true,
+                };
+                const withPlaceholder = isEdit
+                  ? attachments.map(a => a.id === attId ? placeholder : a)
+                  : [...attachments, placeholder];
                 setAttachments(withPlaceholder);
+
                 try {
                   const blob = await fetch(dataUrl).then(r => r.blob());
-                  const { url, publicId } = await uploadFile(blob, 'drawing.png',
+                  const { url, storagePath, bytes } = await uploadFile(
+                    blob, user?.uid ?? 'anon', 'drawing.png',
                     (pct) => setUploadProgress(prev => ({ ...prev, [attId]: pct })));
                   setUploadProgress(prev => { const n = { ...prev }; delete n[attId]; return n; });
-                  const finalAtts = withPlaceholder.map(a => a.id === attId ? { ...a, content: url, cloudinaryPublicId: publicId || undefined } : a);
+                  const finalAtts = withPlaceholder.map(a =>
+                    a.id === attId ? { ...a, content: url, storagePath: storagePath || undefined, fileSizeBytes: bytes || undefined } : a);
                   setAttachments(finalAtts);
                   scheduleAutoSave(finalAtts);
                 } catch {
